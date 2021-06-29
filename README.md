@@ -97,9 +97,9 @@ GoAccess can be compiled and used on *nix systems.
 
 Download, extract and compile GoAccess with:
 
-    $ wget https://tar.goaccess.io/goaccess-1.4.6.tar.gz
-    $ tar -xzvf goaccess-1.4.6.tar.gz
-    $ cd goaccess-1.4.6/
+    $ wget https://tar.goaccess.io/goaccess-1.5.1.tar.gz
+    $ tar -xzvf goaccess-1.5.1.tar.gz
+    $ cd goaccess-1.5.1/
     $ ./configure --enable-utf8 --enable-geoip=mmdb
     $ make
     # make install
@@ -112,6 +112,14 @@ Download, extract and compile GoAccess with:
     $ ./configure --enable-utf8 --enable-geoip=mmdb
     $ make
     # make install
+
+#### Build in isolated container
+
+You can also build the binary for Debian based systems in an isolated container environment to prevent cluttering your local system with the development libraries:
+
+    $ curl -L "https://github.com/allinurl/goaccess/archive/refs/heads/master.tar.gz" | tar -xz && cd goaccess-master
+    $ docker build -t goaccess/build.debian-10 -f Dockerfile.debian-10 .
+    $ docker run -i --rm -v $PWD:/goaccess goaccess/build.debian-10 > goaccess
 
 ### Distributions ###
 
@@ -129,8 +137,10 @@ alternative option below.
 
 #### Official GoAccess Debian & Ubuntu repository ####
 
-    $ echo "deb https://deb.goaccess.io/ $(lsb_release -cs) main" | sudo tee -a /etc/apt/sources.list.d/goaccess.list
-    $ wget -O - https://deb.goaccess.io/gnugpg.key | sudo apt-key --keyring /etc/apt/trusted.gpg.d/goaccess.gpg add -
+    $ wget -O - https://deb.goaccess.io/gnugpg.key | gpg --dearmor \
+        | sudo tee /usr/share/keyrings/goaccess.gpg >/dev/null
+    $ echo "deb [signed-by=/usr/share/keyrings/goaccess.gpg] https://deb.goaccess.io/ $(lsb_release -cs) main" \
+        | sudo tee /etc/apt/sources.list.d/goaccess.list
     $ sudo apt-get update
     $ sudo apt-get install goaccess
 

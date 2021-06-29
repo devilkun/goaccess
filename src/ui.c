@@ -871,9 +871,9 @@ load_host_agents (const char *addr) {
   GAgents *agents = NULL;
   GSLList *keys = NULL, *list = NULL;
   void *data = NULL;
-  uint32_t items = 4;
+  uint32_t items = 4, key = djb2 ((unsigned char *) addr);
 
-  keys = ht_get_keymap_list_from_key (HOSTS, addr);
+  keys = ht_get_keymap_list_from_key (HOSTS, key);
   if (!keys)
     return NULL;
 
@@ -1068,6 +1068,20 @@ set_curses_spinner (GSpinner * spinner) {
   spinner->w = x;
   spinner->spin_x = x - 2;
   spinner->y = y - 1;
+}
+
+/* Determine if we need to lock the mutex. */
+void
+lock_spinner (void) {
+  if (parsing_spinner != NULL && parsing_spinner->state == SPN_RUN)
+    pthread_mutex_lock (&parsing_spinner->mutex);
+}
+
+/* Determine if we need to unlock the mutex. */
+void
+unlock_spinner (void) {
+  if (parsing_spinner != NULL && parsing_spinner->state == SPN_RUN)
+    pthread_mutex_unlock (&parsing_spinner->mutex);
 }
 
 /* Allocate memory for a spinner instance and initialize its data.

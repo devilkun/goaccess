@@ -209,6 +209,24 @@ count_matches (const char *s1, char c) {
   return n;
 }
 
+/* Simple but efficient uint32_t hashing. */
+#if defined(__clang__) && defined(__clang_major__) && (__clang_major__ >= 4)
+__attribute__((no_sanitize ("unsigned-integer-overflow")))
+#if (__clang_major__ >= 12)
+  __attribute__((no_sanitize ("unsigned-shift-base")))
+#endif
+#endif
+  uint32_t
+djb2 (unsigned char *str) {
+  uint32_t hash = 5381;
+  int c;
+
+  while ((c = *str++))
+    hash = ((hash << 5) + hash) + c;    /* hash * 33 + c */
+
+  return hash;
+}
+
 /* String matching where one string contains wildcard characters.
  *
  * If no match found, 1 is returned.
@@ -502,16 +520,21 @@ int
 str_to_time (const char *str, const char *fmt, struct tm *tm) {
   char *end = NULL, *sEnd = NULL;
   unsigned long long ts = 0;
-  int us = strcmp ("%f", fmt) == 0;
-  int ms = strcmp ("%*", fmt) == 0;
+  int us, ms;
 #if !defined(__GLIBC__)
-  int se = strcmp ("%s", fmt) == 0;
+  int se;
 #endif
 
   time_t seconds = 0;
 
   if (str == NULL || *str == '\0' || fmt == NULL || *fmt == '\0')
     return 1;
+
+  us = strcmp ("%f", fmt) == 0;
+  ms = strcmp ("%*", fmt) == 0;
+#if !defined(__GLIBC__)
+  se = strcmp ("%s", fmt) == 0;
+#endif
 
   /* check if char string needs to be converted from milli/micro seconds */
   /* note that MUSL doesn't have %s under strptime(3) */

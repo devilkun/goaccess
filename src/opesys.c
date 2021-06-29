@@ -81,24 +81,24 @@ static const char *os[][2] = {
   {"OS X", "Macintosh"},
   {"Darwin", "Darwin"},
 
-  {"Debian", "GNU+Linux"},
-  {"Ubuntu", "GNU+Linux"},
-  {"Fedora", "GNU+Linux"},
-  {"Mint", "GNU+Linux"},
-  {"SUSE", "GNU+Linux"},
-  {"Mandriva", "GNU+Linux"},
-  {"Red Hat", "GNU+Linux"},
-  {"Gentoo", "GNU+Linux"},
-  {"CentOS", "GNU+Linux"},
-  {"PCLinuxOS", "GNU+Linux"},
-  {"Arch", "GNU+Linux"},
-  {"Parabola", "GNU+Linux"},
+  {"Debian", "Linux"},
+  {"Ubuntu", "Linux"},
+  {"Fedora", "Linux"},
+  {"Mint", "Linux"},
+  {"SUSE", "Linux"},
+  {"Mandriva", "Linux"},
+  {"Red Hat", "Linux"},
+  {"Gentoo", "Linux"},
+  {"CentOS", "Linux"},
+  {"PCLinuxOS", "Linux"},
+  {"Arch", "Linux"},
+  {"Parabola", "Linux"},
 
   {"FreeBSD", "BSD"},
   {"NetBSD", "BSD"},
   {"OpenBSD", "BSD"},
   {"DragonFly", "BSD"},
-  
+
   {"PlayStation", "BSD"},
 
   {"Linux", "Linux"},
@@ -107,7 +107,7 @@ static const char *os[][2] = {
   {"CrOS", "Chrome OS"},
   {"QNX", "Unix-like"},
   {"BB10", "Unix-like"},
-  
+
   {"AIX", "Unix"},
   {"SunOS", "Unix"},
 

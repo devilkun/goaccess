@@ -1432,7 +1432,7 @@ GoAccess.Tables = {
 		var data = GoAccess.getPanelData(panel).metadata;
 
 		for (var i = 0; i < uiItems.length; ++i) {
-			var item = uiItems[i], o = {};
+			var item = uiItems[i];
 			if (this.hideColumn(panel, item.key))
 				continue;
 			cells.push(this.getMetaCell(item, data[item.key], key));
@@ -1597,7 +1597,7 @@ GoAccess.Tables = {
 	renderFullTable: function (panel) {
 		var ui = GoAccess.getPanelUI(panel), page = 0;
 		// panel's data
-		var data = GoAccess.getPanelData(panel), metarows = [];
+		var data = GoAccess.getPanelData(panel);
 
 		// render meta data
 		if (data.hasOwnProperty('metadata')) {

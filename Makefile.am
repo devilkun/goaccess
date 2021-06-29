@@ -46,8 +46,8 @@ CLEANFILES =                          \
 # Tpls
 src/tpls.h: bin2c$(EXEEXT) $(srcdir)/resources/tpls.html
 if HAS_SEDTR
-	cat $(srcdir)/resources/tpls.html | sed "s/^[[:space:]]*//" | sed "/^$$/d" | tr -d "\r\n" > resources/tpls.html.tmp
-	./bin2c resources/tpls.html.tmp src/tpls.h tpls
+	cat $(srcdir)/resources/tpls.html | sed "s/^[[:space:]]*//" | sed "/^$$/d" | tr -d "\r\n" > $(srcdir)/resources/tpls.html.tmp
+	./bin2c $(srcdir)/resources/tpls.html.tmp src/tpls.h tpls
 else
 	./bin2c $(srcdir)/resources/tpls.html src/tpls.h tpls
 endif
@@ -162,6 +162,8 @@ goaccess_SOURCES = \
    src/output.h        \
    src/parser.c        \
    src/parser.h        \
+   src/persistence.c   \
+   src/persistence.h   \
    src/pdjson.c        \
    src/pdjson.h        \
    src/settings.c      \
