@@ -6,7 +6,7 @@
  * \____/  |__/|__//____/\____/\___/_/|_|\___/\__/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,5 +33,8 @@
 #include <stddef.h>
 
 char *base64_encode (const void *buf, size_t size);
+char *base64_decode (const char *data, size_t *out_len);
+char *base64UrlDecode (const char *base64Url);
+char *base64UrlEncode (const char *base64);
 
 #endif // for #ifndef BASE64_H

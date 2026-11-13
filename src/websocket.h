@@ -6,7 +6,7 @@
  * \____/  |__/|__//____/\____/\___/_/|_|\___/\__/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,10 @@
  * SOFTWARE.
  */
 
+#if HAVE_CONFIG_H
+#include <config.h>
+#endif
+
 #ifndef WEBSOCKET_H_INCLUDED
 #define WEBSOCKET_H_INCLUDED
 
@@ -34,6 +38,7 @@
 #include <netinet/in.h>
 #include <limits.h>
 #include <poll.h>
+#include <time.h>
 
 #if HAVE_LIBSSL
 #include <openssl/crypto.h>
@@ -84,6 +89,12 @@
 #  define be16toh(x) OSSwapBigToHostInt16(x)
 #  define be32toh(x) OSSwapBigToHostInt32(x)
 #  define be64toh(x) OSSwapBigToHostInt64(x)
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#  define htobe16(x) (x)
+#  define htobe64(x) (x)
+#  define be16toh(x) (x)
+#  define be32toh(x) (x)
+#  define be64toh(x) (x)
 #else
 #  error Platform not supported!
 #endif
@@ -92,6 +103,7 @@
 #include "gslist.h"
 
 #define WS_BAD_REQUEST_STR "HTTP/1.1 400 Invalid Request\r\n\r\n"
+#define WS_UNAUTHORIZED_STR "HTTP/1.1 401 Unauthorized\r\n\r\n"
 #define WS_SWITCH_PROTO_STR "HTTP/1.1 101 Switching Protocols"
 #define WS_TOO_BUSY_STR "HTTP/1.1 503 Service Unavailable\r\n\r\n"
 
@@ -100,15 +112,15 @@
 
 /* packet header is 3 unit32_t : type, size, listener */
 #define HDR_SIZE              3 * 4
-#define WS_MAX_FRM_SZ         1048576   /* 1 MiB max frame size */
-#define WS_THROTTLE_THLD      2097152   /* 2 MiB throttle threshold */
-#define WS_MAX_HEAD_SZ        8192      /* a reasonable size for request headers */
+#define WS_MAX_FRM_SZ         1048576 /* 1 MiB max frame size */
+#define WS_THROTTLE_THLD      2097152 /* 2 MiB throttle threshold */
+#define WS_MAX_HEAD_SZ        8192 /* a reasonable size for request headers */
 
 #define WS_MAGIC_STR "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_PAYLOAD_EXT16      126
 #define WS_PAYLOAD_EXT64      127
 #define WS_PAYLOAD_FULL       125
-#define WS_FRM_HEAD_SZ         16       /* frame header size */
+#define WS_FRM_HEAD_SZ         16 /* frame header size */
 
 #define WS_FRM_FIN(x)         (((x) >> 7) & 0x01)
 #define WS_FRM_MASK(x)        (((x) >> 7) & 0x01)
@@ -148,6 +160,8 @@ typedef enum WSOPCODE {
   WS_OPCODE_PONG = 0x0A,
 } WSOpcode;
 
+typedef int (*WSAuthCallback) (const char *jwt, const char *secret, time_t * expires_at);
+
 typedef struct WSQueue_ {
   char *queued;                 /* queue data */
   int qlen;                     /* queue length */
@@ -168,6 +182,7 @@ typedef struct WSHeaders_ {
 
   char *agent;
   char *path;
+  char *jwt;
   char *method;
   char *protocol;
   char *host;
@@ -191,7 +206,7 @@ typedef struct WSFrame_ {
   unsigned char mask[4];        /* mask key */
   uint8_t res;                  /* extensions */
   int payload_offset;           /* end of header/start of payload */
-  int payloadlen;               /* payload length (for each frame) */
+  uint64_t payloadlen;          /* payload length (for each frame) */
 
   /* status flags */
   int reading;                  /* still reading frame's header part? */
@@ -216,13 +231,14 @@ typedef struct WSMessage_ {
 typedef struct WSClient_ {
   /* socket data */
   int listener;                 /* socket */
-  char remote_ip[INET6_ADDRSTRLEN];     /* client IP */
+  char remote_ip[INET6_ADDRSTRLEN]; /* client IP */
 
   WSQueue *sockqueue;           /* sending buffer */
   WSHeaders *headers;           /* HTTP headers */
   WSFrame *frame;               /* frame headers */
   WSMessage *message;           /* message */
   WSStatus status;              /* connection status */
+  time_t auth_expiry;           /* absolute JWT expiration time */
 
   struct timeval start_proc;
   struct timeval end_proc;
@@ -262,6 +278,11 @@ typedef struct WSConfig_ {
   const char *sslcert;
   const char *sslkey;
   const char *unix_socket;
+  const char *auth_secret;
+
+  /* Function pointer for JWT verification */
+  WSAuthCallback auth;
+
   int echomode;
   int strict;
   int max_frm_size;
@@ -312,6 +333,8 @@ void ws_set_config_port (const char *port);
 void ws_set_config_sslcert (const char *sslcert);
 void ws_set_config_sslkey (const char *sslkey);
 void ws_set_config_strict (int strict);
+void ws_set_config_auth_secret (const char *auth_secret);
+void ws_set_config_auth_cb (WSAuthCallback auth_cb);
 void ws_start (WSServer * server);
 void ws_stop (WSServer * server);
 WSServer *ws_init (const char *host, const char *port, void (*initopts) (void));

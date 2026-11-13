@@ -6,7 +6,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,34 +33,12 @@
 #include "commons.h"
 #include "parser.h"
 
-/* Total number of storage metrics (GSMetric) */
-#define GSMTRC_TOTAL 19
 #define DB_PATH "/tmp"
 
-/* Enumerated Storage Metrics */
-typedef enum GSMetric_ {
-  MTRC_KEYMAP,
-  MTRC_ROOTMAP,
-  MTRC_DATAMAP,
-  MTRC_UNIQMAP,
-  MTRC_ROOT,
-  MTRC_HITS,
-  MTRC_VISITORS,
-  MTRC_BW,
-  MTRC_CUMTS,
-  MTRC_MAXTS,
-  MTRC_METHODS,
-  MTRC_PROTOCOLS,
-  MTRC_AGENTS,
-  MTRC_METADATA,
-  MTRC_UNIQUE_KEYS,
-  MTRC_AGENT_KEYS,
-  MTRC_AGENT_VALS,
-  MTRC_CNT_VALID,
-  MTRC_CNT_BW,
-} GSMetric;
+/* Separator used to encode TLS hierarchy paths in storage. */
+#define TLS_HIERARCHY_SEPARATOR '/'
 
-#define GAMTRC_TOTAL 8
+#define GAMTRC_TOTAL 9
 /* Enumerated App Metrics */
 typedef enum GAMetric_ {
   MTRC_DATES,
@@ -71,12 +49,85 @@ typedef enum GAMetric_ {
   MTRC_JSON_LOGFMT,
   MTRC_METH_PROTO,
   MTRC_DB_PROPS,
+  MTRC_COUNTRY_CONTINENT,
 } GAMetric;
+
+/* Enumerated Storage Metrics */
+typedef enum GSMetricType_ {
+  /* uint32_t key - uint32_t val */
+  MTRC_TYPE_II32,
+  /* uint32_t key - string val */
+  MTRC_TYPE_IS32,
+  /* uint32_t key - uint64_t val */
+  MTRC_TYPE_IU64,
+  /* string key   - uint32_t val */
+  MTRC_TYPE_SI32,
+  /* string key   - uint8_t val */
+  MTRC_TYPE_SI08,
+  /* string key   - string val */
+  MTRC_TYPE_SS32,
+  /* uint32_t key - GSLList val */
+  MTRC_TYPE_IGSL,
+  /* string key   - uint64_t val */
+  MTRC_TYPE_SU64,
+  /* uint32_t key - GKHashStorage_ val */
+  MTRC_TYPE_IGKH,
+  /* uint64_t key - uint32_t val */
+  MTRC_TYPE_U648,
+  /* uint64_t key - GLastParse val */
+  MTRC_TYPE_IGLP,
+  /* uint32_t key - GKMetricVals val */
+  MTRC_TYPE_IMTV,
+  /* uint64_t key - uint32_t val */
+  MTRC_TYPE_U6432,
+} GSMetricType;
+
+/* Marks which zero-representable numeric metrics have been written for a data
+ * key. Needed to persist the exact same entry set as the former standalone
+ * bw/cumts tables, where a value of zero was still a present entry. */
+#define METRIC_TOUCHED_BW    0x01
+#define METRIC_TOUCHED_CUMTS 0x02
+
+/* Top bit of a MTRC_UNIQUE_KEYS value marks the visitor as already counted
+ * towards visitor metrics; the sequence value occupies the lower 31 bits.
+ * Modules whose data key derives solely from the visitor key use this bit
+ * instead of a per-module uniqmap entry. */
+#define VISITOR_COUNTED_BIT 0x80000000u
+
+/* Aggregated numeric metrics for a data key within a module/date store. All
+ * per-data-key numeric metrics live in a single MTRC_METRICS table entry
+ * instead of one hash table per metric. */
+typedef struct GKMetricVals_ {
+  uint64_t bw;
+  uint64_t cumts;
+  uint64_t maxts;
+  uint32_t hits;
+  uint32_t visitors;
+  uint32_t root;
+  uint8_t meth;
+  uint8_t proto;
+  uint8_t touched;
+} GKMetricVals;
+
+typedef struct GKHashMetric_ {
+  union {
+    GSMetric storem;
+    GAMetric dbm;
+  } metric;
+  GSMetricType type;
+  void *(*alloc) (void);
+  void (*des) (void *, uint8_t free_data);
+  void (*del) (void *, uint8_t free_data);
+  uint8_t free_data:1;
+  void *hash;
+  const char *filename;
+} GKHashMetric;
 
 /* Each record contains a data value, i.e., Windows XP, and it may contain a
  * root value, i.e., Windows, and a unique key which is the combination of
  * date, IP and user agent */
 typedef struct GKeyData_ {
+  char *data_buffer;            /* caller-owned scratch space for a storage identity */
   const void *data;
   uint32_t dhash;
   uint32_t data_nkey;
@@ -88,7 +139,6 @@ typedef struct GKeyData_ {
   uint32_t root_nkey;
   uint32_t crnkey;              /* cache root nkey */
 
-  void *uniq_key;
   uint32_t uniq_nkey;
 
   uint32_t numdate;
@@ -109,6 +159,10 @@ typedef struct GParse_ {
   void (*method) (GModule module, GKeyData * kdata, const char *data);
   void (*protocol) (GModule module, GKeyData * kdata, const char *data);
   void (*agent) (GModule module, GKeyData * kdata, uint32_t agent_nkey);
+  /* the data key derives solely from the visitor key (IP/date/agent), so a
+   * visitor can only ever produce one data key in this module; visitor
+   * counting then keys off the visitor's counted bit instead of a uniqmap */
+  uint8_t vkey_data;
 } GParse;
 
 typedef struct httpmethods_ {
@@ -123,22 +177,31 @@ typedef struct httpprotocols_ {
 
 extern const httpmethods http_methods[];
 extern const httpprotocols http_protocols[];
-extern size_t http_methods_len;
-extern size_t http_protocols_len;
+extern const size_t http_methods_len;
+extern const size_t http_protocols_len;
 
-char *get_mtr_str (GSMetric metric);
+const char *get_mtr_str (GSMetric metric);
 int excluded_ip (GLogItem * logitem);
+#ifdef HAVE_LIBMAXMINDDB
+int excluded_asn (GLogItem * logitem);
+#endif
+int module_vkey_data (GModule module);
 uint32_t *i322ptr (uint32_t val);
 uint64_t *uint642ptr (uint64_t val);
-void count_process_and_invalid (GLog * glog, const char *line);
+void count_process_and_invalid (GLog * glog, GLogItem * logitem, const char *line);
 void count_process (GLog * glog);
 void free_gmetrics (GMetrics * metric);
 void insert_methods_protocols (void);
 void process_log (GLogItem * logitem);
+void set_browser_os (GLogItem * logitem);
 void set_data_metrics (GMetrics * ometrics, GMetrics ** nmetrics, GPercTotals totals);
 void set_module_totals (GPercTotals * totals);
 void uncount_invalid (GLog * glog);
 void uncount_processed (GLog * glog);
 GMetrics *new_gmetrics (void);
+
+#ifdef HAVE_GEOLOCATION
+const char *get_continent_for_country (const char *country);
+#endif
 
 #endif // for #ifndef GSTORAGE_H

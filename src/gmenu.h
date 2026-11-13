@@ -6,7 +6,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -78,6 +78,7 @@ struct GMenu_ {
 };
 
 GMenu *new_gmenu (WINDOW * parent, int h, int w, int y, int x);
+void free_gmenu (GMenu * menu);
 int post_gmenu (GMenu * menu);
 void gmenu_driver (GMenu * menu, int c);
 

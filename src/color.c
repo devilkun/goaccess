@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -49,11 +49,12 @@ static GSLList *color_list = NULL;
 static GSLList *pair_list = NULL;
 
 /* *INDENT-OFF* */
-static GEnum CSTM_COLORS[] = {
+static const GEnum CSTM_COLORS[] = {
   {"COLOR_MTRC_HITS"              , COLOR_MTRC_HITS},
   {"COLOR_MTRC_VISITORS"          , COLOR_MTRC_VISITORS},
   {"COLOR_MTRC_HITS_PERC"         , COLOR_MTRC_HITS_PERC},
   {"COLOR_MTRC_VISITORS_PERC"     , COLOR_MTRC_VISITORS_PERC},
+  {"COLOR_MTRC_BW_PERC"           , COLOR_MTRC_BW_PERC},
   {"COLOR_MTRC_BW"                , COLOR_MTRC_BW},
   {"COLOR_MTRC_AVGTS"             , COLOR_MTRC_AVGTS},
   {"COLOR_MTRC_CUMTS"             , COLOR_MTRC_CUMTS},
@@ -63,8 +64,12 @@ static GEnum CSTM_COLORS[] = {
   {"COLOR_MTRC_DATA"              , COLOR_MTRC_DATA},
   {"COLOR_MTRC_HITS_PERC_MAX"     , COLOR_MTRC_HITS_PERC_MAX},
   {"COLOR_MTRC_VISITORS_PERC_MAX" , COLOR_MTRC_VISITORS_PERC_MAX},
+  {"COLOR_MTRC_BW_PERC_MAX"       , COLOR_MTRC_BW_PERC_MAX},
   {"COLOR_PANEL_COLS"             , COLOR_PANEL_COLS},
   {"COLOR_BARS"                   , COLOR_BARS},
+  {"COLOR_SUBBARS"                , COLOR_SUBBARS},
+  {"COLOR_CHART_AXIS"             , COLOR_CHART_AXIS},
+  {"COLOR_CHART_VALUES"           , COLOR_CHART_VALUES},
   {"COLOR_ERROR"                  , COLOR_ERROR},
   {"COLOR_SELECTED"               , COLOR_SELECTED},
   {"COLOR_PANEL_ACTIVE"           , COLOR_PANEL_ACTIVE},
@@ -79,7 +84,7 @@ static GEnum CSTM_COLORS[] = {
   {"COLOR_PROGRESS"               , COLOR_PROGRESS},
 };
 
-static const char *colors256_mono[] = {
+static const char *const colors256_mono[] = {
   "COLOR_MTRC_HITS              color7:color-1",
   "COLOR_MTRC_VISITORS          color8:color-1",
   "COLOR_MTRC_DATA              color7:color-1",
@@ -101,8 +106,13 @@ static const char *colors256_mono[] = {
   "COLOR_MTRC_HITS_PERC_MAX     color3:color-1 bold VISIT_TIMES",
   "COLOR_MTRC_VISITORS_PERC     color0:color-1 bold",
   "COLOR_MTRC_VISITORS_PERC_MAX color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC           color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC_MAX       color0:color-1 bold",
   "COLOR_PANEL_COLS             color7:color-1",
   "COLOR_BARS                   color7:color-1",
+  "COLOR_SUBBARS                color8:color-1",
+  "COLOR_CHART_AXIS             color7:color-1",
+  "COLOR_CHART_VALUES           color7:color-1",
   "COLOR_ERROR                  color7:color1",
   "COLOR_SELECTED               color7:color8",
   "COLOR_PANEL_ACTIVE           color0:color3",
@@ -117,7 +127,7 @@ static const char *colors256_mono[] = {
   "COLOR_PROGRESS               color0:color6",
 };
 
-static const char *colors256_green[] = {
+static const char *const colors256_green[] = {
   "COLOR_MTRC_HITS              color7:color-1",
   "COLOR_MTRC_VISITORS          color8:color-1",
   "COLOR_MTRC_DATA              color7:color-1",
@@ -139,8 +149,13 @@ static const char *colors256_green[] = {
   "COLOR_MTRC_HITS_PERC_MAX     color3:color-1 bold VISIT_TIMES",
   "COLOR_MTRC_VISITORS_PERC     color0:color-1 bold",
   "COLOR_MTRC_VISITORS_PERC_MAX color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC           color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC_MAX       color0:color-1 bold",
   "COLOR_PANEL_COLS             color7:color-1",
   "COLOR_BARS                   color7:color-1",
+  "COLOR_SUBBARS                color8:color-1",
+  "COLOR_CHART_AXIS             color7:color-1",
+  "COLOR_CHART_VALUES           color7:color-1",
   "COLOR_ERROR                  color7:color1",
   "COLOR_SELECTED               color7:color8",
   "COLOR_PANEL_ACTIVE           color0:color3",
@@ -155,7 +170,7 @@ static const char *colors256_green[] = {
   "COLOR_PROGRESS               color0:color6",
 };
 
-static const char *colors256_monokai[] = {
+static const char *const colors256_monokai[] = {
   "COLOR_MTRC_HITS              color197:color-1",
   "COLOR_MTRC_VISITORS          color148:color-1",
   "COLOR_MTRC_DATA              color7:color-1",
@@ -177,8 +192,13 @@ static const char *colors256_monokai[] = {
   "COLOR_MTRC_HITS_PERC_MAX     color208:color-1 VISIT_TIMES",
   "COLOR_MTRC_VISITORS_PERC     color187:color-1",
   "COLOR_MTRC_VISITORS_PERC_MAX color208:color-1",
+  "COLOR_MTRC_BW_PERC           color187:color-1",
+  "COLOR_MTRC_BW_PERC_MAX       color208:color-1",
   "COLOR_PANEL_COLS             color242:color-1",
-  "COLOR_BARS                   color186:color-1",
+  "COLOR_BARS                   color240:color-1",
+  "COLOR_SUBBARS                color250:color-1",
+  "COLOR_CHART_AXIS             color241:color-1",
+  "COLOR_CHART_VALUES           color248:color-1",
   "COLOR_ERROR                  color231:color197",
   "COLOR_SELECTED               color0:color215",
   "COLOR_PANEL_ACTIVE           color7:color240",
@@ -193,7 +213,7 @@ static const char *colors256_monokai[] = {
   "COLOR_PROGRESS               color7:color141",
 };
 
-static const char *colors8_mono[] = {
+static const char *const colors8_mono[] = {
   "COLOR_MTRC_HITS              color7:color-1",
   "COLOR_MTRC_VISITORS          color0:color-1 bold",
   "COLOR_MTRC_DATA              color7:color-1",
@@ -215,8 +235,13 @@ static const char *colors8_mono[] = {
   "COLOR_MTRC_HITS_PERC_MAX     color3:color-1 bold VISIT_TIMES",
   "COLOR_MTRC_VISITORS_PERC     color0:color-1 bold",
   "COLOR_MTRC_VISITORS_PERC_MAX color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC           color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC_MAX       color0:color-1 bold",
   "COLOR_PANEL_COLS             color7:color-1",
   "COLOR_BARS                   color7:color-1",
+  "COLOR_SUBBARS                color8:color-1",
+  "COLOR_CHART_AXIS             color7:color-1",
+  "COLOR_CHART_VALUES           color7:color-1",
   "COLOR_ERROR                  color7:color1",
   "COLOR_SELECTED               color0:color7",
   "COLOR_PANEL_ACTIVE           color0:color3",
@@ -231,7 +256,7 @@ static const char *colors8_mono[] = {
   "COLOR_PROGRESS               color0:color6",
 };
 
-static const char *colors8_green[] = {
+static const char *const colors8_green[] = {
   "COLOR_MTRC_HITS              color7:color-1",
   "COLOR_MTRC_VISITORS          color0:color-1 bold",
   "COLOR_MTRC_DATA              color7:color-1",
@@ -253,8 +278,13 @@ static const char *colors8_green[] = {
   "COLOR_MTRC_HITS_PERC_MAX     color3:color-1 bold VISIT_TIMES",
   "COLOR_MTRC_VISITORS_PERC     color0:color-1 bold",
   "COLOR_MTRC_VISITORS_PERC_MAX color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC           color0:color-1 bold",
+  "COLOR_MTRC_BW_PERC_MAX       color0:color-1 bold",
   "COLOR_PANEL_COLS             color7:color-1",
   "COLOR_BARS                   color2:color-1",
+  "COLOR_SUBBARS                color8:color-1",
+  "COLOR_CHART_AXIS             color2:color-1",
+  "COLOR_CHART_VALUES           color2:color-1",
   "COLOR_ERROR                  color7:color1",
   "COLOR_SELECTED               color0:color7",
   "COLOR_PANEL_ACTIVE           color0:color3",
@@ -269,7 +299,7 @@ static const char *colors8_green[] = {
   "COLOR_PROGRESS               color0:color6",
 };
 
-static const char *nocolors[] = {
+static const char *const nocolors[] = {
   "COLOR_MTRC_HITS              color0:color-1",
   "COLOR_MTRC_VISITORS          color0:color-1",
   "COLOR_MTRC_DATA              color0:color-1",
@@ -283,8 +313,13 @@ static const char *nocolors[] = {
   "COLOR_MTRC_HITS_PERC_MAX     color0:color-1",
   "COLOR_MTRC_VISITORS_PERC     color0:color-1",
   "COLOR_MTRC_VISITORS_PERC_MAX color0:color-1",
+  "COLOR_MTRC_BW_PERC           color0:color-1",
+  "COLOR_MTRC_BW_PERC_MAX       color0:color-1",
   "COLOR_PANEL_COLS             color0:color-1",
   "COLOR_BARS                   color0:color-1",
+  "COLOR_SUBBARS                color0:color-1",
+  "COLOR_CHART_AXIS             color0:color-1",
+  "COLOR_CHART_VALUES           color0:color-1",
   "COLOR_ERROR                  color0:color-1",
   "COLOR_SELECTED               color0:color-1 reverse",
   "COLOR_PANEL_ACTIVE           color0:color-1 reverse",
@@ -450,7 +485,7 @@ extract_color (char *color) {
  * On error, 1 is returned.
  * On success, 0 is returned. */
 static int
-parse_bg_fg_color (GColorPair * pair, const char *value) {
+parse_bg_fg_color (GColorPair *pair, const char *value) {
   char bgcolor[COLOR_STR_LEN] = "", fgcolor[COLOR_STR_LEN] = "";
   int ret = 0;
 
@@ -468,7 +503,7 @@ parse_bg_fg_color (GColorPair * pair, const char *value) {
 
 /* Assign color attributes from the given config string to GColors. */
 static void
-locate_attr_color (GColors * color, const char *attr) {
+locate_attr_color (GColors *color, const char *attr) {
   if (strstr (attr, "bold"))
     color->attr |= A_BOLD;
   if (strstr (attr, "underline"))
@@ -488,7 +523,7 @@ locate_attr_color (GColors * color, const char *attr) {
  * On error, 1 is returned.
  * On success, 0 is returned. */
 static int
-parse_attr_color (GColors * color, const char *value) {
+parse_attr_color (GColors *color, const char *value) {
   char *line, *ptr, *start;
   int ret = 0;
 
@@ -521,7 +556,7 @@ clean:
  * On error, 1 is returned.
  * On success, 0 is returned. */
 static int
-parse_module_color (GColors * color, const char *value) {
+parse_module_color (GColors *color, const char *value) {
   char *line = xstrdup (value), *p;
 
   p = strrchr (line, ' ');
@@ -648,7 +683,7 @@ get_color_by_item_module (GColorItem item, GModule module) {
  * On error, it aborts.
  * On success, the color properties are assigned */
 static void
-parse_color_line (GColorPair * pair, GColors * color, char *line) {
+parse_color_line (GColorPair *pair, GColors *color, char *line) {
   char *val;
   int item = 0;
   size_t idx;
@@ -687,7 +722,7 @@ parse_color_line (GColorPair * pair, GColors * color, char *line) {
  * On error, or if color already exists, the given color is freed.
  * On success, or if not color found, store color properties */
 static void
-prepend_color (GColors ** color) {
+prepend_color (GColors **color) {
   /* create a list of colors if one does not exist */
   if (color_list == NULL) {
     color_list = list_create (*color);
@@ -753,7 +788,7 @@ parse_color (char *line) {
  * On error, it aborts.
  * On success, the color properties are parsed and stored */
 static void
-parse_colors (const char *colors[], size_t n) {
+parse_colors (const char *const colors[], size_t n) {
   char *line;
   size_t i;
 

@@ -6,7 +6,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -35,6 +35,8 @@
 
 #define MAX_LINE_CONF        4096
 #define MAX_EXTENSIONS        128
+#define MAX_GEOIP_DBS           3
+#define MAX_ASN_RULES        1024 /* bound repeated ASN rules from configuration */
 #define MAX_IGNORE_IPS 1024 + 128
 #define MAX_IGNORE_REF         64
 #define MAX_CUSTOM_COLORS      64
@@ -47,15 +49,20 @@
 typedef enum LOGTYPE {
   COMBINED,
   VCOMBINED,
+  VCOMBINED_PORT,
   COMMON,
   VCOMMON,
+  VCOMMON_PORT,
   W3C,
-  SQUID,
   CLOUDFRONT,
   CLOUDSTORAGE,
   AWSELB,
+  SQUID,
   AWSS3,
   CADDY,
+  AWSALB,
+  TRAEFIKCLF,
+  LOGTYPE_MAX,                  /* count of predefined formats, not a format itself */
 } GLogType;
 
 /* predefined log times */
@@ -77,8 +84,10 @@ typedef struct GPreConfDate_ {
 typedef struct GPreConfLog_ {
   const char *combined;
   const char *vcombined;
+  const char *vcombined_port;
   const char *common;
   const char *vcommon;
+  const char *vcommon_port;
   const char *w3c;
   const char *cloudfront;
   const char *cloudstorage;
@@ -86,6 +95,8 @@ typedef struct GPreConfLog_ {
   const char *squid;
   const char *awss3;
   const char *caddy;
+  const char *awsalb;
+  const char *traefikclf;
 } GPreConfLog;
 
 /* *INDENT-OFF* */
@@ -97,15 +108,20 @@ typedef struct GConf_
   const char *enable_panels[TOTAL_MODULES];     /* array of panels to enable */
   const char *filenames[MAX_FILENAMES];         /* log files */
   const char *hide_referers[MAX_IGNORE_REF];    /* hide referrers from report */
+  uint32_t exclude_asns[MAX_ASN_RULES];         /* sorted ASNs to exclude */
+  uint32_t include_asns[MAX_ASN_RULES];         /* sorted ASNs to include */
   const char *ignore_ips[MAX_IGNORE_IPS];       /* array of ips to ignore */
   const char *ignore_panels[TOTAL_MODULES];     /* array of panels to ignore */
   const char *ignore_referers[MAX_IGNORE_REF];  /* referrers to ignore */
-  const char *ignore_status[MAX_IGNORE_STATUS]; /* status to ignore */
+  int ignore_status[MAX_IGNORE_STATUS]; /* status to ignore */
   const char *output_formats[MAX_OUTFORMATS];   /* output format, e.g. , HTML */
   const char *sort_panels[TOTAL_MODULES];       /* sorting options for each panel */
   const char *static_files[MAX_EXTENSIONS];     /* static extensions */
+  const char *geoip_databases[MAX_GEOIP_DBS];    /* geoip db paths */
 
   /* Log/date/time formats */
+  const char *tz_name;                    /* Canonical TZ name, e.g., America/Chicago */
+  char *date_time_format;           /* date & time format */
   char *date_format;                /* date format */
   char *date_num_format;            /* numeric date format %Y%m%d */
   char *time_format;                /* time format as given by the user */
@@ -116,7 +132,6 @@ typedef struct GConf_
   char ***user_browsers_hash;       /* custom list of browsers */
 
   const char *debug_log;            /* debug log path */
-  const char *geoip_database;       /* geoip db path */
   const char *html_custom_css;      /* custom CSS */
   const char *html_custom_js;       /* custom JS */
   const char *html_prefs;           /* default HTML JSON preferences */
@@ -126,6 +141,7 @@ typedef struct GConf_
   const char *pidfile;              /* daemonize pid file path */
   const char *browsers_file;        /* browser's file path */
   const char *db_path;              /* db path to files */
+  const char *fname_as_vhost;       /* filenames as vhost/server blocks */
 
   /* HTML real-time */
   const char *addr;                 /* IP address to bind to */
@@ -136,26 +152,37 @@ typedef struct GConf_
   const char *sslcert;              /* TLS/SSL path to certificate */
   const char *sslkey;               /* TLS/SSL path to private key */
   const char *ws_url;               /* WebSocket URL */
+  const char *ping_interval;        /* WebSocket ping interval in seconds */
   const char *unix_socket;          /* unix socket to bind to */
+  const char *ws_auth_url;          /* URL to fetch the initial JWT */
+  const char *ws_auth_refresh_url;  /* URL to fetch the refreh JWT */
+  char *ws_auth_secret;             /* WebSocket AUTH */
+  long ws_auth_expire;              /* WebSocket AUTH JWT expire in seconds */
+  int ws_auth_verify_only;          /* WebSocket AUTH verify only */
 
   /* User flags */
   int all_static_files;             /* parse all static files */
   int anonymize_ip;                 /* anonymize ip addresses */
+  int anonymize_level;              /* anonymization level */
   int append_method;                /* append method to the req key */
   int append_protocol;              /* append protocol to the req key */
   int client_err_to_unique_count;   /* count 400s as visitors */
   int code444_as_404;               /* 444 as 404s? */
   int color_scheme;                 /* color scheme */
-  int crawlers_only ;               /* crawlers only */
+  int chunk_size;                   /* chunk size for each thread */
+  int crawlers_only;                /* crawlers only */
   int daemonize;                    /* run program as a Unix daemon */
   const char *username;             /* user to run program as */
   int double_decode;                /* need to double decode */
+  int external_assets;              /* write JS/CSS assets to external files */
   int enable_html_resolver;         /* html/json/csv resolver */
   int geo_db;                       /* legacy geoip db */
   int hl_header;                    /* highlight header on term */
   int ignore_crawlers;              /* ignore crawlers */
+  int unknowns_as_crawlers;         /* unknown OS and browsers are classified as crawlers */
   int ignore_qstr;                  /* ignore query string */
   int ignore_statics;               /* ignore static files */
+  int jobs;                         /* multi-thread jobs count */
   int json_pretty_print;            /* pretty print JSON data */
   int list_agents;                  /* show list of agents per host */
   int load_conf_dlg;                /* load curses config dialog */
@@ -164,7 +191,6 @@ typedef struct GConf_
   int mouse_support;                /* add curses mouse support */
   int no_color;                     /* no terminal colors */
   int no_strict_status;             /* don't enforce 100-599 status codes */
-  int no_column_names;              /* don't show col names on termnal */
   int no_csv_summary;               /* don't show overall metrics */
   int no_html_last_updated;         /* don't show HTML last updated field */
   int no_ip_validation;             /* don't validate client IP addresses */
@@ -183,16 +209,18 @@ typedef struct GConf_
   uint32_t num_tests;               /* number of lines to test */
   uint64_t html_refresh;            /* refresh html report every X of seconds */
   uint64_t log_size;                /* log size override */
+  int concat_vhost_req;             /* concatenate vhost and request */
 
   /* Internal flags */
   int bandwidth;                    /* is there bandwidth within the req line */
   int date_spec_hr;                 /* date specificity - hour */
   int has_geocity;
   int has_geocountry;
+  int has_geoasn;
   int hour_spec_min;                /* hour specificity - min */
   int read_stdin;                   /* read from stdin */
   int serve_usecs;                  /* is there time served within req line */
-  int stop_processing;              /* stop all processing */
+  _Atomic int stop_processing;      /* stop all processing */
   int tailing_mode;                 /* in tailing-mode? */
 
   /* Array indices */
@@ -200,6 +228,8 @@ typedef struct GConf_
   int enable_panel_idx;             /* enable panels index */
   int filenames_idx;                /* filenames index */
   int hide_referer_idx;             /* hide referrers index */
+  int exclude_asn_idx;              /* excluded ASNs index */
+  int include_asn_idx;              /* included ASNs index */
   int ignore_ip_idx;                /* ignored ips index */
   int ignore_panel_idx;             /* ignored panels index */
   int ignore_referer_idx;           /* ignored referrers index */
@@ -207,6 +237,7 @@ typedef struct GConf_
   int output_format_idx;            /* output format index */
   int sort_panel_idx;               /* sort panel index */
   int static_file_idx;              /* static extensions index */
+  int geoip_db_idx;                 /* geoip db index */
   int browsers_hash_idx;            /* browsers hash index */
 
   size_t static_file_max_len;

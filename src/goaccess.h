@@ -6,7 +6,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,12 +31,13 @@
 #define GOACCESS_H_INCLUDED
 
 #include "ui.h"
+#include "dialogs.h"
 
 #define RAND_FN 7 + 1
 
 extern GSpinner *parsing_spinner;
 extern int active_gdns;         /* kill dns pthread flag */
 
-void read_client (void *ptr_data);
+void *read_client (void *ptr_data);
 
 #endif

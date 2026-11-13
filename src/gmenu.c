@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -42,7 +42,7 @@
  *
  * On success, the newly allocated GMenu is returned . */
 GMenu *
-new_gmenu (WINDOW * parent, int h, int w, int y, int x) {
+new_gmenu (WINDOW *parent, int h, int w, int y, int x) {
   GMenu *menu = xmalloc (sizeof (GMenu));
 
   memset (menu, 0, sizeof *menu);
@@ -62,10 +62,27 @@ new_gmenu (WINDOW * parent, int h, int w, int y, int x) {
   return menu;
 }
 
+/* Free a GMenu instance along with its item labels and derived window. */
+void
+free_gmenu (GMenu *menu) {
+  int i;
+
+  if (menu == NULL)
+    return;
+
+  for (i = 0; i < menu->size; ++i)
+    free (menu->items[i].name);
+  free (menu->items);
+
+  /* the derived window has to go before its parent, else ncurses refuses to
+   * delete a parent that still has subwindows */
+  delwin (menu->win);
+  free (menu);
+}
+
 /* Render actual menu item */
 static void
-draw_menu_item (GMenu * menu, char *s, int x, int y, int w, int checked,
-                GColors * (*func) (void)) {
+draw_menu_item (GMenu *menu, char *s, int x, int y, int w, int checked, GColors *(*func) (void)) {
   char check, *lbl = NULL;
 
   if (menu->selectable) {
@@ -85,7 +102,7 @@ draw_menu_item (GMenu * menu, char *s, int x, int y, int w, int checked,
  * On success, the newly created menu is added to the window and 0 is
  * returned. */
 int
-post_gmenu (GMenu * menu) {
+post_gmenu (GMenu *menu) {
   GColors *(*func) (void);
   int i = 0, j = 0, start, end, height, total, checked = 0;
 
@@ -111,7 +128,7 @@ post_gmenu (GMenu * menu) {
 
 /* Main work horse of the menu system processing input events */
 void
-gmenu_driver (GMenu * menu, int c) {
+gmenu_driver (GMenu *menu, int c) {
   int i;
 
   switch (c) {

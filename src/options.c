@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,10 +33,13 @@
 #endif
 
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <getopt.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #ifdef HAVE_LIBGEOIP
 #include <GeoIP.h>
@@ -47,23 +50,34 @@
 #include "error.h"
 #include "labels.h"
 #include "util.h"
+#include "wsauth.h"
 
 #include "xmalloc.h"
 
-static char short_options[] = "f:e:p:o:l:H:M:S:b:"
+typedef struct GLogSourceIdentity_ {
+  dev_t device;
+  ino_t inode;
+  int resolved;
+} GLogSourceIdentity;
+
+static const char *short_options = "b:e:f:j:l:o:p:H:M:S:"
 #ifdef HAVE_LIBGEOIP
   "g"
 #endif
-  "acirmMhHqdsV";
+  "acdhimqrsV";
 
 /* *INDENT-OFF* */
-struct option long_opts[] = {
+static const struct option long_opts[] = {
   {"agent-list"           , no_argument       , 0 , 'a' } ,
   {"browsers-file"        , required_argument , 0 , 'b' } ,
   {"config-dialog"        , no_argument       , 0 , 'c' } ,
   {"config-file"          , required_argument , 0 , 'p' } ,
   {"debug-file"           , required_argument , 0 , 'l' } ,
   {"exclude-ip"           , required_argument , 0 , 'e' } ,
+#ifdef HAVE_LIBMAXMINDDB
+  {"exclude-asn"          , required_argument , 0 , 0  } ,
+  {"include-asn"          , required_argument , 0 , 0  } ,
+#endif
 #ifdef HAVE_LIBGEOIP
   {"std-geoip"            , no_argument       , 0 , 'g' } ,
 #endif
@@ -71,11 +85,12 @@ struct option long_opts[] = {
   {"hl-header"            , no_argument       , 0 , 'i' } ,
   {"http-method"          , required_argument , 0 , 'M' } ,
   {"http-protocol"        , required_argument , 0 , 'H' } ,
+  {"jobs"                 , required_argument , 0 , 'j' } ,
   {"log-file"             , required_argument , 0 , 'f' } ,
   {"log-size"             , required_argument , 0 , 'S' } ,
   {"no-query-string"      , no_argument       , 0 , 'q' } ,
   {"no-term-resolver"     , no_argument       , 0 , 'r' } ,
-  {"output-format"        , required_argument , 0 , 'o' } ,
+  {"output"               , required_argument , 0 , 'o' } ,
   {"storage"              , no_argument       , 0 , 's' } ,
   {"version"              , no_argument       , 0 , 'V' } ,
   {"with-mouse"           , no_argument       , 0 , 'm' } ,
@@ -86,15 +101,20 @@ struct option long_opts[] = {
   {"unix-socket"          , required_argument , 0 , 0  }  ,
   {"all-static-files"     , no_argument       , 0 , 0  }  ,
   {"anonymize-ip"         , no_argument       , 0 , 0  }  ,
+  {"anonymize-level"      , required_argument , 0 , 0  }  ,
   {"color"                , required_argument , 0 , 0  }  ,
   {"color-scheme"         , required_argument , 0 , 0  }  ,
   {"crawlers-only"        , no_argument       , 0 , 0  }  ,
+  {"chunk-size"           , required_argument , 0 , 0  }  ,
   {"daemonize"            , no_argument       , 0 , 0  }  ,
+  {"datetime-format"      , required_argument , 0 , 0  }  ,
   {"date-format"          , required_argument , 0 , 0  }  ,
   {"date-spec"            , required_argument , 0 , 0  }  ,
   {"db-path"              , required_argument , 0 , 0  }  ,
+  {"fname-as-vhost"       , required_argument , 0 , 0  }  ,
   {"dcf"                  , no_argument       , 0 , 0  }  ,
   {"double-decode"        , no_argument       , 0 , 0  }  ,
+  {"external-assets"      , no_argument       , 0 , 0  }  ,
   {"enable-panel"         , required_argument , 0 , 0  }  ,
   {"fifo-in"              , required_argument , 0 , 0  }  ,
   {"fifo-out"             , required_argument , 0 , 0  }  ,
@@ -118,7 +138,6 @@ struct option long_opts[] = {
   {"max-items"            , required_argument , 0 , 0  }  ,
   {"no-color"             , no_argument       , 0 , 0  }  ,
   {"no-strict-status"     , no_argument       , 0 , 0  }  ,
-  {"no-column-names"      , no_argument       , 0 , 0  }  ,
   {"no-csv-summary"       , no_argument       , 0 , 0  }  ,
   {"no-global-config"     , no_argument       , 0 , 0  }  ,
   {"no-html-last-updated" , no_argument       , 0 , 0  }  ,
@@ -128,7 +147,7 @@ struct option long_opts[] = {
   {"no-tab-scroll"        , no_argument       , 0 , 0  }  ,
   {"num-tests"            , required_argument , 0 , 0  }  ,
   {"origin"               , required_argument , 0 , 0  }  ,
-  {"output"               , required_argument , 0 , 0  }  ,
+  {"output-format"        , required_argument , 0 , 0  }  ,
   {"persist"              , no_argument       , 0 , 0  }  ,
   {"pid-file"             , required_argument , 0 , 0  }  ,
   {"port"                 , required_argument , 0 , 0  }  ,
@@ -138,6 +157,8 @@ struct option long_opts[] = {
   {"restore"              , no_argument       , 0 , 0  }  ,
   {"sort-panel"           , required_argument , 0 , 0  }  ,
   {"static-file"          , required_argument , 0 , 0  }  ,
+  {"tz"                   , required_argument , 0 , 0  }  ,
+  {"unknowns-as-crawlers" , no_argument       , 0 , 0  }  ,
   {"user-name"            , required_argument , 0 , 0  }  ,
 #ifdef HAVE_LIBSSL
   {"ssl-cert"             , required_argument , 0 ,  0  } ,
@@ -145,9 +166,17 @@ struct option long_opts[] = {
 #endif
   {"time-format"          , required_argument , 0 ,  0  } ,
   {"ws-url"               , required_argument , 0 ,  0  } ,
+#ifdef HAVE_LIBSSL
+  {"ws-auth"              , required_argument , 0 ,  0  } ,
+  {"ws-auth-expire"       , required_argument , 0 ,  0  } ,
+  {"ws-auth-url"          , required_argument , 0 ,  0  } ,
+  {"ws-auth-refresh-url"  , required_argument , 0 ,  0  } ,
+#endif
+  {"ping-interval"        , required_argument , 0 ,  0  } ,
 #ifdef HAVE_GEOLOCATION
   {"geoip-database"       , required_argument , 0 ,  0  } ,
 #endif
+  {"concat-vhost-req"     , no_argument       , 0 ,  0  } ,
   {0, 0, 0, 0}
 };
 
@@ -163,113 +192,184 @@ cmd_help (void)
 
   printf (
   /* Log & Date Format Options */
-  CYN "LOG & DATE FORMAT OPTIONS\n\n" RESET
+  CYN "LOG & DATE FORMAT OPTIONS" RESET
+  "\n\n"
+  "  --log-format=<logformat>        - Specify log format. Inner quotes need\n"
+  "                                    escaping, or use single quotes.\n"
   "  --date-format=<dateformat>      - Specify log date format. e.g., %%d/%%b/%%Y\n"
-  "  --log-format=<logformat>        - Specify log format. Inner quotes need escaping, or use single quotes.\n"
-  "  --time-format=<timeformat>      - Specify log time format. e.g., %%H:%%M:%%S\n\n"
+  "  --time-format=<timeformat>      - Specify log time format. e.g., %%H:%%M:%%S\n"
+  "  --datetime-format=<dt-format>   - Specify log date and time format. e.g.,\n"
+  "                                    %%d/%%b/%%Y %%H:%%M:%%S %%z\n"
   "\n"
   /* User Interface Options */
-  CYN "USER INTERFACE OPTIONS\n\n" RESET
+  CYN "USER INTERFACE OPTIONS" RESET
+  "\n\n"
   "  -c --config-dialog              - Prompt log/date/time configuration window.\n"
   "  -i --hl-header                  - Color highlight active panel.\n"
   "  -m --with-mouse                 - Enable mouse support on main dashboard.\n"
-  "  --color=<fg:bg[attrs, PANEL]>   - Specify custom colors. See manpage for more details.\n"
-  "  --color-scheme=<1|2|3>          - Schemes: 1 => Grey, 2 => Green, 3 => Monokai.\n"
-  "  --html-custom-css=<path.css>    - Specify a custom CSS file in the HTML report.\n"
-  "  --html-custom-js=<path.js>      - Specify a custom JS file in the HTML report.\n"
+  "  --color=<fg:bg[attrs, PANEL]>   - Specify custom colors. See manpage for more\n"
+  "                                    details.\n"
+  "  --color-scheme=<1|2|3>          - Schemes: 1 => Grey, 2 => Green, 3 =>\n"
+  "                                    Monokai.\n"
+  "  --html-custom-css=<path.css>    - Specify a custom CSS file in the HTML\n"
+  "                                    report.\n"
+  "  --html-custom-js=<path.js>      - Specify a custom JS file in the HTML\n"
+  "                                    report.\n"
   "  --html-prefs=<json_obj>         - Set default HTML report preferences.\n"
   "  --html-report-title=<title>     - Set HTML report page title and header.\n"
-  "  --html-refresh=<secs>           - Refresh HTML report every X seconds (>=1 or <=60).\n"
+  "  --html-refresh=<secs>           - Refresh HTML report every X seconds (>=1 or\n"
+  "                                    <=60).\n"
   "  --json-pretty-print             - Format JSON output w/ tabs & newlines.\n"
-  "  --max-items                     - Maximum number of items to show per panel. See man page for limits.\n"
+  "  --max-items=<number>            - Maximum number of items to show per panel.\n"
+  "                                    See man page for limits.\n"
   "  --no-color                      - Disable colored output.\n"
-  "  --no-column-names               - Don't write column names in term output.\n"
   "  --no-csv-summary                - Disable summary metrics on the CSV output.\n"
   "  --no-html-last-updated          - Hide HTML last updated field.\n"
-  "  --no-parsing-spinner            - Disable progress metrics and parsing spinner.\n"
-  "  --no-progress                   - Disable progress metrics.\n"
+  "  --no-parsing-spinner            - Disable progress metrics and spinner.\n"
+  "  --no-progress                   - Disable parsing and hostname resolution\n"
+  "                                    progress metrics.\n"
   "  --no-tab-scroll                 - Disable scrolling through panels on TAB.\n"
+  "  --tz=<timezone>                 - Use the specified timezone (canonical name,\n"
+  "                                    e.g., America/Chicago).\n"
   "\n"
   ""
   /* Server Options */
-  CYN "SERVER OPTIONS\n\n" RESET
+  CYN "SERVER OPTIONS" RESET
+  "\n\n"
   "  --addr=<addr>                   - Specify IP address to bind server to.\n"
-  "  --unix-socket=<addr>            - Specify UNIX-domain socket address to bind server to.\n"
-  "  --daemonize                     - Run as daemon (if --real-time-html enabled).\n"
+  "  --unix-socket=<addr>            - Specify UNIX-domain socket address to bind\n"
+  "                                    server to.\n"
+  "  --daemonize                     - Run as daemon (if --real-time-html\n"
+  "                                    enabled).\n"
   "  --fifo-in=<path>                - Path to read named pipe (FIFO).\n"
   "  --fifo-out=<path>               - Path to write named pipe (FIFO).\n"
-  "  --origin=<addr>                 - Ensure clients send this origin header upon the WebSocket handshake.\n"
-  "  --pid-file=<path>               - Write PID to a file when --daemonize is used.\n"
+  "  --origin=<addr>                 - Ensure clients send this origin header upon\n"
+  "                                    the WebSocket handshake.\n"
+  "  --pid-file=<path>               - Write PID to a file when --daemonize is\n"
+  "                                    used.\n"
   "  --port=<port>                   - Specify the port to use.\n"
   "  --real-time-html                - Enable real-time HTML output.\n"
   "  --ssl-cert=<cert.crt>           - Path to TLS/SSL certificate.\n"
   "  --ssl-key=<priv.key>            - Path to TLS/SSL private key.\n"
   "  --user-name=<username>          - Run as the specified user.\n"
   "  --ws-url=<url>                  - URL to which the WebSocket server responds.\n"
+#ifdef HAVE_LIBSSL
+  "  --ws-auth=<jwt[:secret]>        - Enables WebSocket authentication using a\n"
+  "                                    JSON Web Token (JWT). Optionally, a secret key\n"
+  "                                    can be provided for verification.\n"
+  "  --ws-auth-expire=<secs>         - Time after which the JWT expires.\n"
+  "  --ws-auth-url=<url>             - URL to fetch the initial JWT .\n"
+  "                                    e.g., https://site.com/api/get-auth-token\n"
+  "  --ws-auth-refresh-url=<url>     - URL to fetch a new JWT when initial expires.\n"
+  "                                    e.g., https://site.com/api/refresh-token\n"
+#endif
+  "  --ping-interval=<secs>          - Enable WebSocket ping with specified\n"
+  "                                    interval in seconds.\n"
   "\n"
   ""
   /* File Options */
-  CYN "FILE OPTIONS\n\n" RESET
+  CYN "FILE OPTIONS" RESET
+  "\n\n"
   "  -                               - The log file to parse is read from stdin.\n"
   "  -f --log-file=<filename>        - Path to input log file.\n"
-  "  -l --debug-file=<filename>      - Send all debug messages to the specified file.\n"
+  "  -l --debug-file=<filename>      - Send all debug messages to the specified\n"
+  "                                    file.\n"
   "  -p --config-file=<filename>     - Custom configuration file.\n"
-  "  -S --log-size=<number>          - Specify the log size, useful when piping in logs.\n"
+  "  -S --log-size=<number>          - Specify the log size, useful when piping in\n"
+  "                                    logs.\n"
+  "  --external-assets               - Output HTML assets to external JS/CSS files.\n"
   "  --invalid-requests=<filename>   - Log invalid requests to the specified file.\n"
   "  --no-global-config              - Don't load global configuration file.\n"
-  "  --unknowns-log=<filename>       - Log unknown browsers and OSs to the specified file.\n"
+  "  --unknowns-log=<filename>       - Log unknown browsers and OSs to the\n"
+  "                                    specified file.\n"
   "\n"
   ""
   /* Parse Options */
-  CYN "PARSE OPTIONS\n\n" RESET
+  CYN "PARSE OPTIONS" RESET
+  "\n\n"
   "  -a --agent-list                 - Enable a list of user-agents by host.\n"
   "  -b --browsers-file=<path>       - Use additional custom list of browsers.\n"
-  "  -d --with-output-resolver       - Enable IP resolver on HTML|JSON output.\n"
-  "  -e --exclude-ip=<IP>            - Exclude one or multiple IPv4/6. Allows IP ranges\n"
-  "                                    e.g. 192.168.0.1-192.168.0.10\n"
+  "  -d --with-output-resolver       - Enable IP resolver on HTML|JSON|CSV output.\n"
+  "  -e --exclude-ip=<IP>            - Exclude one or multiple IPv4/6. Allows IP\n"
+  "                                    ranges. e.g., 192.168.0.1-192.168.0.10\n"
+  "  -j --jobs=<1-6>                 - Thread count for parsing log. Defaults to 1.\n"
+  "                                    The use of 2-4 threads is recommended.\n"
   "  -H --http-protocol=<yes|no>     - Set/unset HTTP request protocol if found.\n"
   "  -M --http-method=<yes|no>       - Set/unset HTTP request method if found.\n"
-  "  -o --output=file.html|json|csv  - Output either an HTML, JSON or a CSV file.\n"
-  "  -q --no-query-string            - Strip request's query string. This can decrease memory consumption.\n"
+  "  -o --output=<format|filename>   - Output to stdout or the specified file.\n"
+  "                                    e.g., -o csv, -o out.json, --output=report.html\n"
+  "  -q --no-query-string            - Strip request's query string. This can\n"
+  "                                    decrease memory consumption.\n"
   "  -r --no-term-resolver           - Disable IP resolver on terminal output.\n"
   "  --444-as-404                    - Treat non-standard status code 444 as 404.\n"
-  "  --4xx-to-unique-count           - Add 4xx client errors to the unique visitors count.\n"
+  "  --4xx-to-unique-count           - Add 4xx client errors to the unique\n"
+  "                                    visitors count.\n"
   "  --all-static-files              - Include static files with a query string.\n"
-  "  --anonymize-ip                  - Anonymize IP addresses before outputting to report.\n"
+  "  --anonymize-ip                  - Anonymize host addresses before storage\n"
+  "                                    and reporting.\n"
+  "  --anonymize-level=<1|2|3>       - Anonymization levels: 1 => default, 2 =>\n"
+  "                                    strong, 3 => pedantic.\n"
+  "  --chunk-size=<256-32768>        - Number of lines processed in each data chunk\n"
+  "                                    for parallel execution. Default is 1024.\n"
+  "  --concat-vhost-req              - Prepend the virtual host to the request\n"
+  "                                    field. Requires %%v in the log format.\n"
   "  --crawlers-only                 - Parse and display only crawlers.\n"
-  "  --date-spec=<date|hr>           - Date specificity. Possible values: `date` (default), or `hr`.\n"
+  "  --date-spec=<date|hr|min>       - Date specificity. Possible values: `date`\n"
+  "                                    (default), `hr` or `min`.\n"
+  "  --db-path=<path>                - Persist data to disk on exit to the given\n"
+  "                                    path or /tmp as default.\n"
   "  --double-decode                 - Decode double-encoded values.\n"
   "  --enable-panel=<PANEL>          - Enable parsing/displaying the given panel.\n"
-  "  --hide-referrer=<NEEDLE>        - Hide a referrer but still count it. Wild cards are allowed.\n"
-  "                                    i.e., *.bing.com\n"
-  "  --hour-spec=<hr|min>            - Hour specificity. Possible values: `hr` (default),\n"
-  "                                    or `min` (tenth of a min).\n"
+  "  --fname-as-vhost=<regex>        - Use log filename(s) as virtual host(s).\n"
+  "                                    POSIX regex is passed to extract virtual\n"
+  "                                    host.\n"
+  "  --hide-referrer=<NEEDLE>        - Hide a referrer but still count it. Wild\n"
+  "                                    cards are allowed. i.e., *.bing.com\n"
+  "  --hour-spec=<hr|min>            - Hour specificity. Possible values: `hr`\n"
+  "                                    (default) or `min` (tenth of a min).\n"
   "  --ignore-crawlers               - Ignore crawlers.\n"
   "  --ignore-panel=<PANEL>          - Ignore parsing/displaying the given panel.\n"
-  "  --ignore-referrer=<NEEDLE>      - Ignore a referrer from being counted. Wild cards are allowed.\n"
-  "                                    i.e., *.bing.com\n"
+  "  --ignore-referrer=<NEEDLE>      - Ignore a referrer from being counted. Wild\n"
+  "                                    cards are allowed. i.e., *.bing.com\n"
   "  --ignore-statics=<req|panel>    - Ignore static requests.\n"
   "                                    req => Ignore from valid requests.\n"
-  "                                    panel => Ignore from valid requests and panels.\n"
+  "                                    panel => Ignore from valid requests and\n"
+  "                                    panels.\n"
   "  --ignore-status=<CODE>          - Ignore parsing the given status code.\n"
   "  --keep-last=<NDAYS>             - Keep the last NDAYS in storage.\n"
   "  --no-ip-validation              - Disable client IPv4/6  validation.\n"
   "  --no-strict-status              - Disable HTTP status code validation.\n"
   "  --num-tests=<number>            - Number of lines to test. >= 0 (10 default)\n"
-  "  --persist                       - Persist data to disk on exit to the given --db-path or to /tmp.\n"
+  "  --persist                       - Persist data to disk on exit to the given\n"
+  "                                    --db-path or to /tmp.\n"
   "  --process-and-exit              - Parse log and exit without outputting data.\n"
-  "  --real-os                       - Display real OS names. e.g, Windows XP, Snow Leopard.\n"
-  "  --restore                       - Restore data from disk from the given --db-path or from /tmp.\n"
-  "  --sort-panel=PANEL,METRIC,ORDER - Sort panel on initial load. e.g., --sort-panel=VISITORS,BY_HITS,ASC.\n"
+  "  --real-os                       - Display real OS names. e.g, Windows XP,\n"
+  "                                    Snow Leopard.\n"
+  "  --restore                       - Restore data from disk from the given\n"
+  "                                    --db-path or from /tmp.\n"
+  "  --sort-panel=PANEL,METRIC,ORDER - Sort panel on initial load. e.g.,\n"
+  "                                    --sort-panel=VISITORS,BY_HITS,ASC.\n"
   "                                    See manpage for a list of panels/fields.\n"
-  "  --static-file=<extension>       - Add static file extension. e.g.: .mp3. Extensions are case sensitive.\n"
+  "  --static-file=<extension>       - Add static file extension. e.g.: .mp3.\n"
+  "                                    Extensions are case sensitive.\n"
+  "  --unknowns-as-crawlers          - Classify unknown OS and browsers as crawlers.\n"
   "\n"
 
 /* GeoIP Options */
 #ifdef HAVE_GEOLOCATION
-  CYN "GEOIP OPTIONS\n\n" RESET
+  CYN "GEOIP OPTIONS" RESET
+  "\n\n"
 #ifdef HAVE_LIBGEOIP
-  "  -g --std-geoip                  - Standard GeoIP database for less memory consumption.\n"
+  "  -g --std-geoip                  - Standard GeoIP database for less memory\n"
+  "                                    consumption (legacy DB).\n"
+#endif
+#ifdef HAVE_LIBMAXMINDDB
+  "  --exclude-asn=<ASN>             - Exclude requests from an ASN. Accepts the\n"
+  "                                    numeric form or AS-prefixed form.\n"
+  "  --include-asn=<ASN>             - Only include requests from the given ASN.\n"
+  "                                    All other requests, including those with\n"
+  "                                    no resolvable ASN, are dropped. Accepts\n"
+  "                                    the numeric form or AS-prefixed form.\n"
 #endif
   "  --geoip-database=<path>         - Specify path to GeoIP database file.\n"
   "                                    i.e., GeoLiteCity.dat, GeoIPv6.dat ...\n"
@@ -277,16 +377,18 @@ cmd_help (void)
 #endif
 
 /* Other Options */
-  CYN "OTHER OPTIONS\n\n" RESET
+  CYN "OTHER OPTIONS" RESET
+  "\n\n"
   "  -h --help                       - This help.\n"
   "  -s --storage                    - Display current storage method. e.g., Hash.\n"
   "  -V --version                    - Display version information and exit.\n"
-  "  --dcf                           - Display the path of the default config file when `-p` is not used.\n"
+  "  --dcf                           - Display the path of the default config file\n"
+  "                                    when `-p` is not used.\n"
   "\n"
 
   "%s `man goaccess`.\n\n"
   "%s: %s\n"
-  "GoAccess Copyright (C) 2009-2020 by Gerardo Orellana"
+  "GoAccess Copyright (C) 2009-2026 by Gerardo Orellana"
   "\n\n"
   , INFO_HELP_EXAMPLES, INFO_MORE_INFO, GO_WEBSITE
   );
@@ -302,6 +404,345 @@ set_array_opt (const char *oarg, const char *arr[], int *size, int max) {
     arr[(*size)++] = oarg;
 }
 
+/* Resolve the filesystem identity of a log source.
+ *
+ * On success, an identity with resolved set is returned.
+ * On failure, an identity with resolved cleared is returned. */
+static GLogSourceIdentity
+get_log_source_identity (const char *filename) {
+  GLogSourceIdentity identity = { 0 };
+  struct stat file_stat;
+
+  if (stat (filename, &file_stat) != 0)
+    return identity;
+
+  identity.device = file_stat.st_dev;
+  identity.inode = file_stat.st_ino;
+  identity.resolved = 1;
+  return identity;
+}
+
+/* Check whether two resolved identities identify the same log source.
+ *
+ * If both identities identify the same source, non-zero is returned.
+ * If either is unresolved or the sources differ, 0 is returned. */
+static int
+same_log_source (const GLogSourceIdentity *left, const GLogSourceIdentity *right) {
+  if (!left->resolved || !right->resolved)
+    return 0;
+
+  return left->device == right->device && left->inode == right->inode;
+}
+
+/* Add a log source unless it is already present under the same or an alias path. */
+static void
+add_log_filename (const char *filename, GLogSourceIdentity identities[]) {
+  GLogSourceIdentity identity = { 0 };
+  int i = 0;
+
+  for (i = 0; i < conf.filenames_idx; i++)
+    if (strcmp (filename, conf.filenames[i]) == 0)
+      return;
+
+  if (conf.filenames_idx >= MAX_FILENAMES)
+    return;
+
+  identity = get_log_source_identity (filename);
+  for (i = 0; i < conf.filenames_idx; i++)
+    if (same_log_source (&identity, &identities[i]))
+      return;
+
+  identities[conf.filenames_idx] = identity;
+  conf.filenames[conf.filenames_idx++] = filename;
+}
+
+#ifdef HAVE_LIBSSL
+/*
+ * parse_ws_auth_expire_option:
+ *   Parses a time duration string and converts it to seconds.
+ *
+ * Supported formats:
+ *   "3600"       -> 3600 seconds
+ *   "24h"        -> 24 hours = 24 * 3600 seconds
+ *   "10m"        -> 10 minutes = 10 * 60 seconds
+ *   "10d"        -> 10 days = 10 * 86400 seconds
+ *
+ * Returns 0 on success, nonzero on failure.
+ */
+static int
+parse_ws_auth_expire_option (const char *input) {
+  char *endptr = NULL;
+  double value = 0, multiplier = 0, total_seconds = 0;
+
+  if (!input || *input == '\0')
+    return -1;  // Empty or NULL string
+
+  value = strtod (input, &endptr);
+  if (endptr == input) {
+    // No conversion could be performed
+    return -1;
+  }
+
+  multiplier = 1.0;
+  /* Skip any whitespace after the number */
+  while (isspace ((unsigned char) *endptr))
+    endptr++;
+
+  if (*endptr != '\0') {
+    /* Expect a single unit character; any extra characters are not allowed */
+    char unit = *endptr;
+    endptr++;
+    while (isspace ((unsigned char) *endptr))
+      endptr++;
+
+    if (*endptr != '\0') {
+      // Extra unexpected characters
+      return -1;
+    }
+
+    switch (unit) {
+    case 's':
+    case 'S':
+      multiplier = 1.0;
+      break;
+    case 'm':
+    case 'M':
+      multiplier = 60.0;
+      break;
+    case 'h':
+    case 'H':
+      multiplier = 3600.0;
+      break;
+    case 'd':
+    case 'D':
+      multiplier = 86400.0;
+      break;
+    default:
+      // Unknown unit
+      return -1;
+    }
+  }
+
+  total_seconds = value * multiplier;
+  if (total_seconds < 0)
+    return -1;  // Negative durations are not allowed
+
+  /* Store the result in your global configuration */
+  conf.ws_auth_expire = (long) total_seconds;
+  return 0;
+}
+
+ /**
+ * Reads a JWT secret from a file path
+ * @param path File path containing the secret
+ * @return 0 on success, 1 on failure
+ */
+static int
+parse_jwt_from_file (const char *path) {
+  conf.ws_auth_secret = read_secret_from_file (path);
+  if (conf.ws_auth_secret == NULL) {
+    fprintf (stderr, "Failed to read secret from file: %s\n", path);
+    return 1;
+  }
+  conf.ws_auth_verify_only = 1;
+  return 0;
+}
+
+/**
+ * Retrieves a JWT secret from an environment variable
+ * @param env_var Environment variable name (without '$' prefix)
+ * @return 0 on success, 1 on failure
+ */
+static int
+parse_jwt_from_env (const char *env_var) {
+  const char *env_secret = getenv (env_var);
+  if (env_secret != NULL) {
+    conf.ws_auth_secret = strdup (env_secret);
+    conf.ws_auth_verify_only = 1;
+    return 0;
+  }
+  fprintf (stderr, "Environment variable %s not found\n", env_var);
+  return 1;
+}
+
+/**
+ * Handles the 'verify:' prefix for JWT authentication
+ * @param secret_spec Secret specification string
+ * @return 0 on success, 1 on failure
+ */
+static int
+parse_jwt_verify_option (const char *secret_spec) {
+  /* First try to read from file */
+  if (access (secret_spec, F_OK) == 0) {
+    return parse_jwt_from_file (secret_spec);
+  }
+
+  /* Then try environment variable if path contains '$' */
+  if (*secret_spec == '$') {
+    return parse_jwt_from_env (secret_spec + 1);
+  }
+
+  /* Finally use as direct secret string */
+  conf.ws_auth_verify_only = 1;
+  conf.ws_auth_secret = strdup (secret_spec);
+  return 0;
+}
+
+/**
+ * Handles the legacy JWT format without 'verify:' prefix
+ * @param remainder String after 'jwt:' prefix
+ * @return 0 on success
+ */
+static int
+parse_legacy_jwt_option (const char *remainder) {
+  if (access (remainder, F_OK) == 0) {
+    conf.ws_auth_secret = read_secret_from_file (remainder);
+  } else {
+    conf.ws_auth_secret = strdup (remainder);
+  }
+  return 0;
+}
+
+/**
+ * Handles the plain 'jwt' option with no additional parameters
+ * @return 0 on success
+ */
+static int
+parse_plain_jwt_option (void) {
+  /* Try to get secret from environment variable */
+  const char *env_secret = getenv ("GOACCESS_WSAUTH_SECRET");
+  if (env_secret != NULL) {
+    conf.ws_auth_secret = strdup (env_secret);
+  } else {
+    /* Fallback to generating a secret */
+    conf.ws_auth_secret = generate_ws_auth_secret ();
+  }
+  return 0;
+}
+
+/**
+ * Options:
+ * # Read secret from file
+ * --ws-auth="jwt:verify:/etc/ws_secret.txt"
+ *
+ * # Get secret from environment variable
+ * --ws-auth="jwt:verify:$GOACCESS_WSAUTH_SECRET"
+ *
+ * # Use direct secret string
+ * --ws-auth="jwt:verify:my_super_secret_key"
+ *
+ * # Legacy formats still work
+ * --ws-auth="jwt:/path/to/secret"
+ * --ws-auth="jwt:super_secret_key"
+ * --ws-auth="jwt" // generate one
+ *
+ * Parses websocket authentication options
+ * @param optarg Option argument string
+ * @return 0 on success, 1 on failure/invalid option
+ */
+static int
+parse_ws_auth_option (const char *optarg) {
+  /* Handle cases where it starts with "jwt:" */
+  const char *remainder = NULL;
+  /* First check for plain "jwt" option (no colon) */
+  if (strcmp (optarg, "jwt") == 0)
+    return parse_plain_jwt_option ();
+
+  /* If it doesn't start with "jwt:", it's invalid */
+  if (strncmp (optarg, "jwt:", 4) != 0)
+    return 1;
+
+  /* Handle cases where it starts with "jwt:" */
+  remainder = optarg + 4;
+
+  /* If the remainder is exactly "verify", that's reserved – error out */
+  if (strcmp (remainder, "verify") == 0)
+    return 1;
+
+  /* Check for "verify:" prefix */
+  if (strncmp (remainder, "verify:", 7) == 0) {
+    // Ensure that there is a secret specification after "verify:"
+    if (remainder[7] == '\0') {
+      return 1; /* "verify:" with nothing following is invalid */
+    }
+    return parse_jwt_verify_option (remainder + 7);
+  }
+
+  /* Legacy jwt:secret format */
+  return parse_legacy_jwt_option (remainder);
+}
+
+static int
+validate_url_basic (const char *url) {
+  /* Check for NULL */
+  if (!url)
+    return 0;
+
+  /* Check for http:// or https:// protocol */
+  if (strncmp (url, "http://", 7) == 0) {
+    /* Make sure there's something after http:// */
+    return url[7] != '\0';
+  } else if (strncmp (url, "https://", 8) == 0) {
+    /* Make sure there's something after https:// */
+    return url[8] != '\0';
+  }
+
+  return 0;     /* No valid protocol */
+}
+#endif
+
+#ifdef HAVE_LIBMAXMINDDB
+/* Parse a numeric or AS-prefixed autonomous system number.
+ *
+ * On success, the normalized ASN is assigned and 0 is returned.
+ * On failure, 1 is returned. */
+static int
+parse_asn (const char *value, uint32_t *asn) {
+  char *end = NULL;
+  const char *number = value;
+  unsigned long long parsed = 0;
+
+  if (!value || !asn)
+    return 1;
+
+  if ((value[0] == 'A' || value[0] == 'a') && (value[1] == 'S' || value[1] == 's'))
+    number += 2;
+
+  if (!isdigit ((unsigned char) *number))
+    return 1;
+
+  errno = 0;
+  parsed = strtoull (number, &end, 10);
+  if (errno == ERANGE || *end != '\0' || parsed == 0 || parsed > UINT32_MAX)
+    return 1;
+
+  *asn = (uint32_t) parsed;
+  return 0;
+}
+
+/* Add an ASN to an exclusion or inclusion list while keeping it sorted. */
+static void
+add_asn (const char *opt, const char *value, uint32_t *list, int *len) {
+  uint32_t asn = 0;
+  int idx = 0;
+
+  if (parse_asn (value, &asn))
+    FATAL ("Invalid --%s value: %s", opt, value ? value : "(null)");
+
+  while (idx < *len && list[idx] < asn)
+    idx++;
+
+  if (idx < *len && list[idx] == asn)
+    return;
+  if (*len >= MAX_ASN_RULES)
+    FATAL ("Maximum number of --%s options reached: %d", opt, MAX_ASN_RULES);
+
+  memmove (&list[idx + 1], &list[idx], (*len - idx) * sizeof (*list));
+  list[idx] = asn;
+  (*len)++;
+}
+#endif
+
 /* Parse command line long options. */
 static void
 parse_long_opt (const char *name, const char *oarg) {
@@ -310,6 +751,13 @@ parse_long_opt (const char *name, const char *oarg) {
 
   /* LOG & DATE FORMAT OPTIONS
    * ========================= */
+
+  /* datetime format */
+  if (!strcmp ("datetime-format", name) && !conf.date_format && !conf.time_format) {
+    set_date_format_str (oarg);
+    set_time_format_str (oarg);
+  }
+
   /* log format */
   if (!strcmp ("log-format", name))
     set_log_format_str (oarg);
@@ -333,12 +781,18 @@ parse_long_opt (const char *name, const char *oarg) {
     conf.color_scheme = atoi (oarg);
 
   /* html custom CSS */
-  if (!strcmp ("html-custom-css", name))
+  if (!strcmp ("html-custom-css", name)) {
+    if (strpbrk (oarg, "&\"'<>"))
+      FATAL ("Invalid filename. The following chars are not allowed in filename: [\"'&<>]\n");
     conf.html_custom_css = oarg;
+  }
 
   /* html custom JS */
-  if (!strcmp ("html-custom-js", name))
+  if (!strcmp ("html-custom-js", name)) {
+    if (strpbrk (oarg, "&\"'<>"))
+      FATAL ("Invalid filename. The following chars are not allowed in filename: [\"'&<>]\n");
     conf.html_custom_js = oarg;
+  }
 
   /* html JSON object containing default preferences */
   if (!strcmp ("html-prefs", name))
@@ -369,10 +823,6 @@ parse_long_opt (const char *name, const char *oarg) {
   /* no strict status */
   if (!strcmp ("no-strict-status", name))
     conf.no_strict_status = 1;
-
-  /* no columns */
-  if (!strcmp ("no-column-names", name))
-    conf.no_column_names = 1;
 
   /* no csv summary */
   if (!strcmp ("no-csv-summary", name))
@@ -449,16 +899,60 @@ parse_long_opt (const char *name, const char *oarg) {
     conf.restore = 1;
 
   /* TLS/SSL certificate */
-  if (!strcmp ("ssl-cert", name))
+  if (!strcmp ("ssl-cert", name)) {
+    // Check if the SSL certificate file exists and is readable
+    if (access (oarg, F_OK) != 0)
+      FATAL ("SSL certificate file does not exist");
+    if (access (oarg, R_OK) != 0)
+      FATAL ("SSL certificate file is not accessible");
     conf.sslcert = oarg;
+  }
 
   /* TLS/SSL private key */
-  if (!strcmp ("ssl-key", name))
+  if (!strcmp ("ssl-key", name)) {
+    // Check if the SSL private key file exists and is readable
+    if (access (oarg, F_OK) != 0)
+      FATAL ("SSL key file does not exist");
+    if (access (oarg, R_OK) != 0)
+      FATAL ("SSL key file is not accessible");
     conf.sslkey = oarg;
+  }
+
+  /* timezone */
+  if (!strcmp ("tz", name))
+    conf.tz_name = oarg;
 
   /* URL to which the WebSocket server responds. */
   if (!strcmp ("ws-url", name))
     conf.ws_url = oarg;
+
+#ifdef HAVE_LIBSSL
+  /* WebSocket auth */
+  if (!strcmp ("ws-auth", name) && parse_ws_auth_option (oarg) != 0)
+    FATAL ("Invalid --ws-auth option.");
+
+  /* WebSocket auth JWT expires */
+  if (!strcmp ("ws-auth-expire", name) && parse_ws_auth_expire_option (oarg) != 0)
+    FATAL ("Invalid --ws-auth-expire option.");
+
+  /* WebSocket auth JWT URL */
+  if (!strcmp ("ws-auth-url", name)) {
+    if (validate_url_basic (oarg) == 0)
+      FATAL ("Invalid --ws-auth-url option (check URL validity).");
+    conf.ws_auth_url = oarg;
+  }
+
+  /* WebSocket auth JWT URL refresh */
+  if (!strcmp ("ws-auth-refresh-url", name)) {
+    if (validate_url_basic (oarg) == 0)
+      FATAL ("Invalid --ws-auth-refresh-url option (check URL validity).");
+    conf.ws_auth_refresh_url = oarg;
+  }
+#endif
+
+  /* WebSocket ping interval in seconds */
+  if (!strcmp ("ping-interval", name))
+    conf.ping_interval = oarg;
 
   /* FILE OPTIONS
    * ========================= */
@@ -475,8 +969,8 @@ parse_long_opt (const char *name, const char *oarg) {
   }
 
   /* output file */
-  if (!strcmp ("output", name))
-    set_array_opt (oarg, conf.output_formats, &conf.output_format_idx, MAX_OUTFORMATS);
+  if (!strcmp ("output-format", name))
+    FATAL ("The option --output-format is deprecated, please use --output instead.");
 
   /* PARSE OPTIONS
    * ========================= */
@@ -492,17 +986,37 @@ parse_long_opt (const char *name, const char *oarg) {
   if (!strcmp ("anonymize-ip", name))
     conf.anonymize_ip = 1;
 
+  /* anonymization level */
+  if (!strcmp ("anonymize-level", name))
+    conf.anonymize_level = atoi (oarg);
+
   /* all static files */
   if (!strcmp ("all-static-files", name))
     conf.all_static_files = 1;
+
+  /* chunk size */
+  if (!strcmp ("chunk-size", name)) {
+    /* Recommended chunk size is 256 - 32768, hard limit is 32 - 1048576. */
+    conf.chunk_size = atoi (oarg);
+    if (conf.chunk_size < 32)
+      FATAL ("The hard lower limit of --chunk-size is 32.");
+    if (conf.chunk_size > 1048576)
+      FATAL ("The hard limit of --chunk-size is 1048576.");
+  }
 
   /* crawlers only */
   if (!strcmp ("crawlers-only", name))
     conf.crawlers_only = 1;
 
   /* date specificity */
-  if (!strcmp ("date-spec", name) && !strcmp (oarg, "hr"))
-    conf.date_spec_hr = 1;
+  if (!strcmp ("date-spec", name)) {
+    if (!strcmp (oarg, "hr"))
+      conf.date_spec_hr = 1;
+    else if (!strcmp (oarg, "min"))
+      conf.date_spec_hr = 2;
+    else if (!strcmp (oarg, "date"))
+      conf.date_spec_hr = 0;
+  }
 
   /* double decode */
   if (!strcmp ("double-decode", name))
@@ -511,6 +1025,10 @@ parse_long_opt (const char *name, const char *oarg) {
   /* enable panel */
   if (!strcmp ("enable-panel", name))
     set_array_opt (oarg, conf.enable_panels, &conf.enable_panel_idx, TOTAL_MODULES);
+
+  /* external assets */
+  if (!strcmp ("external-assets", name))
+    conf.external_assets = 1;
 
   /* hour specificity */
   if (!strcmp ("hour-spec", name) && !strcmp (oarg, "min"))
@@ -538,7 +1056,8 @@ parse_long_opt (const char *name, const char *oarg) {
 
   /* ignore status code */
   if (!strcmp ("ignore-status", name))
-    set_array_opt (oarg, conf.ignore_status, &conf.ignore_status_idx, MAX_IGNORE_STATUS);
+    if (conf.ignore_status_idx < MAX_IGNORE_STATUS)
+      conf.ignore_status[conf.ignore_status_idx++] = atoi (oarg);
 
   /* ignore static requests */
   if (!strcmp ("ignore-statics", name)) {
@@ -578,8 +1097,17 @@ parse_long_opt (const char *name, const char *oarg) {
   }
 
   /* specifies the path of the database file */
-  if (!strcmp ("db-path", name))
+  if (!strcmp ("db-path", name)) {
+    struct stat st;
+    // Check if the directory exists and is accessible
+    if (stat (oarg, &st) != 0 || !S_ISDIR (st.st_mode))
+      FATAL ("Database path does not exist or is not a directory");
     conf.db_path = oarg;
+  }
+
+  /* specifies the regex to extract the virtual host */
+  if (!strcmp ("fname-as-vhost", name) && oarg && *oarg != '\0')
+    conf.fname_as_vhost = oarg;
 
   /* process and exit */
   if (!strcmp ("process-and-exit", name))
@@ -600,11 +1128,29 @@ parse_long_opt (const char *name, const char *oarg) {
     set_array_opt (oarg, conf.static_files, &conf.static_file_idx, MAX_EXTENSIONS);
   }
 
+  /* classify unknowns as crawlers */
+  if (!strcmp ("unknowns-as-crawlers", name))
+    conf.unknowns_as_crawlers = 1;
+
+  /* concatenate vhost and request */
+  if (!strcmp ("concat-vhost-req", name))
+    conf.concat_vhost_req = 1;
+
   /* GEOIP OPTIONS
    * ========================= */
+#ifdef HAVE_LIBMAXMINDDB
+  /* exclude requests originating from an ASN */
+  if (!strcmp ("exclude-asn", name))
+    add_asn (name, oarg, conf.exclude_asns, &conf.exclude_asn_idx);
+
+  /* only include requests originating from an ASN */
+  if (!strcmp ("include-asn", name))
+    add_asn (name, oarg, conf.include_asns, &conf.include_asn_idx);
+#endif
+
   /* specifies the path of the GeoIP City database file */
-  if (!strcmp ("geoip-database", name))
-    conf.geoip_database = oarg;
+  if (!strcmp ("geoip-database", name) && conf.geoip_db_idx < MAX_GEOIP_DBS)
+    set_array_opt (oarg, conf.geoip_databases, &conf.geoip_db_idx, MAX_GEOIP_DBS);
 
   /* default config file --dwf */
   if (!strcmp ("dcf", name)) {
@@ -660,6 +1206,7 @@ add_dash_filename (void) {
 /* Read the user's supplied command line options. */
 void
 read_option_args (int argc, char **argv) {
+  GLogSourceIdentity identities[MAX_FILENAMES] = { 0 };
   int o, idx = 0;
 
 #ifdef HAVE_LIBGEOIP
@@ -671,8 +1218,7 @@ read_option_args (int argc, char **argv) {
       break;
     switch (o) {
     case 'f':
-      if (conf.filenames_idx < MAX_FILENAMES)
-        conf.filenames[conf.filenames_idx++] = optarg;
+      add_log_filename (optarg, identities);
       break;
     case 'S':
       if (strchr (optarg, '-')) {
@@ -707,15 +1253,20 @@ read_option_args (int argc, char **argv) {
     case 'i':
       conf.hl_header = 1;
       break;
+    case 'j':
+      /* Recommended 4 threads, soft limit is 6, hard limit is 12. */
+      conf.jobs = atoi (optarg);
+      if (conf.jobs > 12)
+        FATAL ("The hard limit of --jobs is 12.");
+      break;
     case 'q':
       conf.ignore_qstr = 1;
       break;
     case 'o':
-      if (!valid_output_type (optarg)) {
-        printf
-          ("[ERROR] Invalid filename extension used, must be any of .csv, .json, or .html\n");
-        exit (EXIT_FAILURE);
-      }
+      if (!valid_output_type (optarg))
+        FATAL ("Invalid filename extension. It must be any of .csv, .json, or .html\n");
+      if (!is_writable_path (optarg))
+        FATAL ("Invalid or unwritable path.");
       if (conf.output_format_idx < MAX_OUTFORMATS)
         conf.output_formats[conf.output_format_idx++] = optarg;
       break;
@@ -769,9 +1320,26 @@ read_option_args (int argc, char **argv) {
     if (!conf.read_stdin && strcmp ("-", argv[idx]) == 0)
       add_dash_filename ();
     /* read filenames */
-    else {
-      if (conf.filenames_idx < MAX_FILENAMES)
-        conf.filenames[conf.filenames_idx++] = argv[idx];
+    else
+      add_log_filename (argv[idx], identities);
+  }
+
+  /* Final validation:
+   * When using JWT verify mode, the ws-auth-url must be provided.
+   * And if a ws-auth-refresh-url is set, then both ws_auth_verify_only and ws_auth_url must be set.
+   */
+  if (conf.ws_auth_verify_only && !conf.ws_auth_url) {
+    FATAL ("--ws-auth with verify requires --ws-auth-url to be set.");
+  }
+
+  if (conf.ws_auth_refresh_url) {
+    if (!conf.ws_auth_verify_only || !conf.ws_auth_url) {
+      FATAL
+        ("--ws-auth-refresh-url requires both --ws-auth with verify and --ws-auth-url to be set.");
     }
+  }
+  // Ensure that both ssl-cert and ssl-key are either both set or both unset
+  if ((conf.sslcert && !conf.sslkey) || (!conf.sslcert && conf.sslkey)) {
+    FATAL ("Both --ssl-cert and --ssl-key must be set and accessible.");
   }
 }

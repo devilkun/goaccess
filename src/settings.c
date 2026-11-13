@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -46,42 +46,63 @@
 #include "util.h"
 #include "xmalloc.h"
 
+/* Grow saved path offsets in batches to avoid reallocating for each member. */
+#define JSON_KEY_STACK_INC 16
+
+typedef struct GJSONKey_ {
+  char *path;
+  size_t *lengths;
+  size_t depth, capacity;
+} GJSONKey;
+
 static char **nargv;
 static int nargc = 0;
 
 /* *INDENT-OFF* */
-static GEnum LOGTYPE[] = {
-  {"COMBINED"     , COMBINED}     ,
-  {"VCOMBINED"    , VCOMBINED}    ,
-  {"COMMON"       , COMMON}       ,
-  {"VCOMMON"      , VCOMMON}      ,
-  {"W3C"          , W3C}          ,
-  {"SQUID"        , SQUID}        ,
-  {"CLOUDFRONT"   , CLOUDFRONT}   ,
-  {"CLOUDSTORAGE" , CLOUDSTORAGE} ,
-  {"AWSELB"       , AWSELB}       ,
-  {"AWSS3"        , AWSS3}        ,
-  {"CADDY"        , CADDY}        ,
+static const GEnum LOGTYPE[] = {
+  {"COMBINED"       , COMBINED}       ,
+  {"VCOMBINED"      , VCOMBINED}      ,
+  {"VCOMBINED_PORT" , VCOMBINED_PORT} ,
+  {"COMMON"         , COMMON}         ,
+  {"VCOMMON"        , VCOMMON}        ,
+  {"VCOMMON_PORT"   , VCOMMON_PORT}   ,
+  {"W3C"            , W3C}            ,
+  {"CLOUDFRONT"     , CLOUDFRONT}     ,
+  {"CLOUDSTORAGE"   , CLOUDSTORAGE}   ,
+  {"AWSELB"         , AWSELB}         ,
+  {"SQUID"          , SQUID}          ,
+  {"AWSS3"          , AWSS3}          ,
+  {"CADDY"          , CADDY}          ,
+  {"AWSALB"         , AWSALB}         ,
+  {"TRAEFIKCLF"     , TRAEFIKCLF}     ,
 };
 
 static const GPreConfLog logs = {
   "%h %^[%d:%t %^] \"%r\" %s %b \"%R\" \"%u\"",                 /* NCSA */
-  "%v:%^ %h %^[%d:%t %^] \"%r\" %s %b \"%R\" \"%u\"",           /* NCSA + VHost  */
+  "%v %h %^[%d:%t %^] \"%r\" %s %b \"%R\" \"%u\"",             /* NCSA + VHost */
+  "%v:%p %h %^[%d:%t %^] \"%r\" %s %b \"%R\" \"%u\"",           /* NCSA + VHost:Port */
   "%h %^[%d:%t %^] \"%r\" %s %b",                               /* CLF */
-  "%v:%^ %h %^[%d:%t %^] \"%r\" %s %b",                         /* CLF+VHost */
+  "%v %h %^[%d:%t %^] \"%r\" %s %b",                           /* CLF + VHost */
+  "%v:%p %h %^[%d:%t %^] \"%r\" %s %b",                         /* CLF + VHost:Port */
   "%d %t %^ %m %U %q %^ %^ %h %u %R %s %^ %^ %L",               /* W3C */
-  "%d\\t%t\\t%^\\t%b\\t%h\\t%m\\t%v\\t%U\\t%s\\t%R\\t%u\\t%q\\t%^\\t%C\\t%^\\t%^\\t%^\\t%^\\t%T\\t%^\\t%K\\t%k\\t%^\\t%H\\t%^",  /* CloudFront */
+  /* CloudFront legacy standard-log prefix; newer trailing fields are ignored. */
+  "%d\\t%t\\t%^\\t%b\\t%h\\t%m\\t%v\\t%U\\t%s\\t%R\\t%u\\t%q"
+  "\\t%^\\t%C\\t%^\\t%^\\t%^\\t%^\\t%T\\t%^\\t%K\\t%k\\t%^\\t%H\\t%^",
   "\"%x\",\"%h\",%^,%^,\"%m\",\"%U\",\"%s\",%^,\"%b\",\"%D\",%^,\"%R\",\"%u\"", /* Cloud Storage */
   "%^ %dT%t.%^ %^ %h:%^ %^ %^ %T %^ %s %^ %^ %b \"%r\" \"%u\" %k %K %^ \"%^\" \"%v\"",    /* AWS Elastic Load Balancing */
   "%^ %^ %^ %v %^: %x.%^ %~%L %h %^/%s %b %m %U",               /* Squid Native */
   "%^ %v [%d:%t %^] %h %^\"%r\" %s %^ %b %^ %L %^ \"%R\" \"%u\"", /* Amazon S3 */
 
   /* Caddy JSON */
-  "{ \"ts\": \"%x.%^\", \"request\": { \"remote_addr\": \"%h:%^\", \"proto\":"
+  "{ \"ts\": \"%x.%^\", \"request\": { \"client_ip\": \"%h\", \"proto\":"
   "\"%H\", \"method\": \"%m\", \"host\": \"%v\", \"uri\": \"%U\", \"headers\": {"
   "\"User-Agent\": [\"%u\"], \"Referer\": [\"%R\"] }, \"tls\": { \"cipher_suite\":"
-  "\"%k\", \"proto\": \"%K\" } }, \"duration\": \"%T\", \"size\": \"%b\","
-  "\"status\": \"%s\", \"resp_headers\": { \"Content-Type\": [\"%M\"] } }"
+  "\"%k\", \"version\": \"%K\" } }, \"duration\": \"%T\", \"size\": \"%b\","
+  "\"status\": \"%s\", \"resp_headers\": { \"Content-Type\": [\"%M\"] } }",
+
+  "%^ %dT%t.%^ %v %h:%^ %^ %^ %T %^ %s %^ %^ %b \"%r\" \"%u\" %k %K %^", /* Amazon ALB */
+
+  "%h - %e [%d:%t %^] \"%r\" %s %b \"%R\" \"%u\" %^ \"%v\" \"%U\" %Lms" /* Traefik's CLF flavor with header */
 };
 
 static const GPreConfTime times = {
@@ -99,7 +120,7 @@ static const GPreConfDate dates = {
 /* *INDENT-ON* */
 
 /* Ignore the following options */
-static const char *ignore_cmd_opts[] = {
+static const char *const ignore_cmd_opts[] = {
   "help",
   "storage",
   "version",
@@ -166,7 +187,7 @@ get_config_file_path (void) {
 void
 set_default_static_files (void) {
   size_t i;
-  const char *exts[] = {
+  const char *const exts[] = {
     ".css",
     ".js ",
     ".jpg",
@@ -209,6 +230,11 @@ set_default_static_files (void) {
   if (conf.static_file_idx > 0)
     return;
 
+  /* If a configuration file is used and, if no static-file extensions are provided, do not set the default static-file extensions. */
+  if (conf.iconfigfile != NULL && conf.static_file_idx == 0) {
+    return;
+  }
+
   for (i = 0; i < ARRAY_SIZE (exts); i++) {
     if (conf.static_file_max_len < strlen (exts[i]))
       conf.static_file_max_len = strlen (exts[i]);
@@ -225,6 +251,7 @@ free_formats (void) {
   free (conf.spec_date_time_format);
   free (conf.spec_date_time_num_format);
   free (conf.time_format);
+  free (conf.date_time_format);
 }
 
 /* Clean malloc'd command line arguments. */
@@ -237,6 +264,7 @@ free_cmd_args (void) {
     free (nargv[i]);
   free (nargv);
   free (conf.iconfigfile);
+  free (conf.ws_auth_secret);
 }
 
 /* Append extra value to argv */
@@ -263,7 +291,7 @@ parse_conf_file (int *argc, char ***argv) {
   size_t idx;
 
   /* assumes program name is on argv[0], though, it is not guaranteed */
-  append_to_argv (&nargc, &nargv, xstrdup ((char *) *argv[0]));
+  append_to_argv (&nargc, &nargv, xstrdup (*argv[0] ? : PACKAGE_NAME));
 
   /* determine which config file to open, default or custom */
   path = get_config_file_path ();
@@ -370,10 +398,14 @@ get_selected_format_idx (void) {
     return COMMON;
   else if (strcmp (conf.log_format, logs.vcommon) == 0)
     return VCOMMON;
+  else if (strcmp (conf.log_format, logs.vcommon_port) == 0)
+    return VCOMMON_PORT;
   else if (strcmp (conf.log_format, logs.combined) == 0)
     return COMBINED;
   else if (strcmp (conf.log_format, logs.vcombined) == 0)
     return VCOMBINED;
+  else if (strcmp (conf.log_format, logs.vcombined_port) == 0)
+    return VCOMBINED_PORT;
   else if (strcmp (conf.log_format, logs.w3c) == 0)
     return W3C;
   else if (strcmp (conf.log_format, logs.cloudfront) == 0)
@@ -388,6 +420,10 @@ get_selected_format_idx (void) {
     return AWSS3;
   else if (strcmp (conf.log_format, logs.caddy) == 0)
     return CADDY;
+  else if (strcmp (conf.log_format, logs.awsalb) == 0)
+    return AWSALB;
+  else if (strcmp (conf.log_format, logs.traefikclf) == 0)
+    return TRAEFIKCLF;
   else
     return (size_t) -1;
 }
@@ -401,17 +437,23 @@ char *
 get_selected_format_str (size_t idx) {
   char *fmt = NULL;
   switch (idx) {
+  case COMBINED:
+    fmt = alloc_string (logs.combined);
+    break;
+  case VCOMBINED:
+    fmt = alloc_string (logs.vcombined);
+    break;
+  case VCOMBINED_PORT:
+    fmt = alloc_string (logs.vcombined_port);
+    break;
   case COMMON:
     fmt = alloc_string (logs.common);
     break;
   case VCOMMON:
     fmt = alloc_string (logs.vcommon);
     break;
-  case COMBINED:
-    fmt = alloc_string (logs.combined);
-    break;
-  case VCOMBINED:
-    fmt = alloc_string (logs.vcombined);
+  case VCOMMON_PORT:
+    fmt = alloc_string (logs.vcommon_port);
     break;
   case W3C:
     fmt = alloc_string (logs.w3c);
@@ -434,6 +476,12 @@ get_selected_format_str (size_t idx) {
   case CADDY:
     fmt = alloc_string (logs.caddy);
     break;
+  case AWSALB:
+    fmt = alloc_string (logs.awsalb);
+    break;
+  case TRAEFIKCLF:
+    fmt = alloc_string (logs.traefikclf);
+    break;
   }
 
   return fmt;
@@ -450,12 +498,16 @@ get_selected_date_str (size_t idx) {
   switch (idx) {
   case COMMON:
   case VCOMMON:
+  case VCOMMON_PORT:
   case COMBINED:
   case VCOMBINED:
+  case VCOMBINED_PORT:
   case AWSS3:
+  case TRAEFIKCLF:
     fmt = alloc_string (dates.apache);
     break;
   case AWSELB:
+  case AWSALB:
   case CLOUDFRONT:
   case W3C:
     fmt = alloc_string (dates.w3c);
@@ -482,13 +534,17 @@ get_selected_time_str (size_t idx) {
   char *fmt = NULL;
   switch (idx) {
   case AWSELB:
+  case AWSALB:
   case CLOUDFRONT:
   case COMBINED:
   case COMMON:
   case VCOMBINED:
+  case VCOMBINED_PORT:
   case VCOMMON:
+  case VCOMMON_PORT:
   case W3C:
   case AWSS3:
+  case TRAEFIKCLF:
     fmt = alloc_string (times.fmt24);
     break;
   case CLOUDSTORAGE:
@@ -619,8 +675,10 @@ set_spec_date_time_num_format (void) {
     return;
   }
 
-  if (conf.date_spec_hr && strchr (tf, 'H'))
+  if (conf.date_spec_hr == 1 && strchr (tf, 'H'))
     buf = append_spec_date_format (df, "%H");
+  else if (conf.date_spec_hr == 2 && strchr (tf, 'M'))
+    buf = append_spec_date_format (df, "%H%M");
   else
     buf = xstrdup (df);
 
@@ -628,9 +686,9 @@ set_spec_date_time_num_format (void) {
   free (tf);
 }
 
-/* Set a human readable specificity date and time format.
+/* Set a human-readable specificity date and time format.
  *
- * On success, the human readable date time specificity format is set. */
+ * On success, the human-readable date time specificity format is set. */
 static void
 set_spec_date_time_format (void) {
   char *buf = NULL;
@@ -651,6 +709,8 @@ set_spec_date_time_format (void) {
     buflen += snprintf (buf + buflen, flen - buflen, "%%Y");
   if (strchr (fmt, 'H'))
     buflen += snprintf (buf + buflen, flen - buflen, ":%%H");
+  if (strchr (fmt, 'M'))
+    buflen += snprintf (buf + buflen, flen - buflen, ":%%M");
 
   conf.spec_date_time_format = buf;
 }
@@ -677,7 +737,7 @@ set_date_num_format (void) {
   }
 
   flen = strlen (fdate) + 1;
-  flen = MAX (MIN_DATENUM_FMT_LEN, flen);       /* at least %Y%m%d + 1 */
+  flen = MAX (MIN_DATENUM_FMT_LEN, flen); /* at least %Y%m%d + 1 */
   buf = xcalloc (flen, sizeof (char));
 
   /* always add a %Y */
@@ -717,105 +777,94 @@ is_json_log_format (const char *fmt) {
   return 1;
 }
 
-/* Delete the given key from a nested object key or empty the key. */
+/* Save the parent path length and append an object member name. */
 static void
-dec_json_key (char *key) {
-  char *ptr = NULL;
-  if (key && (ptr = strrchr (key, '.')))
-    *ptr = '\0';
-  else if (key && !(ptr = strrchr (key, '.')))
-    key[0] = '\0';
+push_json_key (GJSONKey *key, const char *name) {
+  if (key->depth == key->capacity) {
+    key->capacity += JSON_KEY_STACK_INC;
+    key->lengths = xrealloc (key->lengths, key->capacity * sizeof (*key->lengths));
+  }
+
+  key->lengths[key->depth] = strlen (key->path);
+  if (key->depth > 0)
+    append_str (&key->path, ".");
+  append_str (&key->path, name);
+  key->depth++;
 }
 
-/* Given a JSON string, parse it and call the given function pointer after each
- * value.
+/* Restore the parent path after an object member's entire value ends. */
+static void
+pop_json_key (GJSONKey *key) {
+  key->path[key->lengths[--key->depth]] = '\0';
+}
+
+/* Parse a JSON string and call the callback for each scalar value.
  *
- * On error, a non-zero value is returned.
- * On success, 0 is returned. */
+ * On success, 0 is returned.
+ * On failure, -1 or the callback's non-zero return value is returned. */
 int
 parse_json_string (void *ptr_data, const char *str, int (*cb) (void *, char *, char *)) {
-  char *key = NULL, *val = NULL;
+  GJSONKey key = { 0 };
+  char *val = NULL;
   enum json_type ctx = JSON_ERROR, t = JSON_ERROR;
   int ret = 0;
-  size_t len = 0, level = 0;
+  size_t count = 0;
   json_stream json;
 
   json_open_string (&json, str);
   do {
     t = json_next (&json);
+    ctx = json_get_context (&json, &count);
 
     switch (t) {
     case JSON_OBJECT:
-      if (key == NULL)
-        key = xstrdup ("");
+      if (key.path == NULL)
+        key.path = xstrdup ("");
       break;
     case JSON_ARRAY_END:
     case JSON_OBJECT_END:
-      dec_json_key (key);
+      /* Array elements share their member's path, including nested containers. */
+      if (ctx == JSON_OBJECT)
+        pop_json_key (&key);
       break;
     case JSON_TRUE:
       val = xstrdup ("true");
-      if (!key || (ret = (*cb) (ptr_data, key, val)))
-        goto clean;
-      ctx = json_get_context (&json, &level);
-      if (ctx != JSON_ARRAY)
-        dec_json_key (key);
-      free (val);
-      val = NULL;
       break;
     case JSON_FALSE:
       val = xstrdup ("false");
-      if (!key || (ret = (*cb) (ptr_data, key, val)))
-        goto clean;
-      ctx = json_get_context (&json, &level);
-      if (ctx != JSON_ARRAY)
-        dec_json_key (key);
-      free (val);
-      val = NULL;
       break;
     case JSON_NULL:
       val = xstrdup ("-");
-      if (!key || (ret = (*cb) (ptr_data, key, val)))
-        goto clean;
-      ctx = json_get_context (&json, &level);
-      if (ctx != JSON_ARRAY)
-        dec_json_key (key);
-      free (val);
-      val = NULL;
       break;
     case JSON_STRING:
     case JSON_NUMBER:
-      ctx = json_get_context (&json, &level);
-      /* key */
-      if ((level % 2) != 0 && ctx != JSON_ARRAY) {
-        if (strlen (key) != 0)
-          append_str (&key, ".");
-        append_str (&key, json_get_string (&json, &len));
-      }
-      /* val */
-      else if (key && (ctx == JSON_ARRAY || ((level % 2) == 0 && ctx != JSON_ARRAY))) {
-        val = xstrdup (json_get_string (&json, &len));
-        if (!key || (ret = (*cb) (ptr_data, key, val)))
-          goto clean;
-        if (ctx != JSON_ARRAY)
-          dec_json_key (key);
-
-        free (val);
-        val = NULL;
-      }
+      if (ctx == JSON_OBJECT && count % 2 != 0)
+        push_json_key (&key, json_get_string (&json, NULL));
+      else if (key.path)
+        val = xstrdup (json_get_string (&json, NULL));
       break;
     case JSON_ERROR:
       ret = -1;
       goto clean;
-      break;
     default:
       break;
     }
-  } while (t != JSON_DONE && t != JSON_ERROR);
+
+    if (!val)
+      continue;
+    if (!key.path || (ret = (*cb) (ptr_data, key.path, val)))
+      goto clean;
+    if (ctx == JSON_OBJECT)
+      pop_json_key (&key);
+
+    free (val);
+    val = NULL;
+  } while (t != JSON_DONE);
 
 clean:
   free (val);
-  free (key);
+  free (key.path);
+  free (key.lengths);
   json_close (&json);
 
   return ret;
@@ -903,18 +952,18 @@ set_time_format_str (const char *oarg) {
 /* Determine if some global flags were set through log-format. */
 static void
 contains_specifier (void) {
-  conf.serve_usecs = conf.bandwidth = 0;        /* flag */
+  conf.serve_usecs = conf.bandwidth = 0; /* flag */
   if (!conf.log_format)
     return;
 
   if (strstr (conf.log_format, "%b"))
     conf.bandwidth = 1; /* flag */
   if (strstr (conf.log_format, "%D"))
-    conf.serve_usecs = 1;       /* flag */
+    conf.serve_usecs = 1; /* flag */
   if (strstr (conf.log_format, "%T"))
-    conf.serve_usecs = 1;       /* flag */
+    conf.serve_usecs = 1; /* flag */
   if (strstr (conf.log_format, "%L"))
-    conf.serve_usecs = 1;       /* flag */
+    conf.serve_usecs = 1; /* flag */
 }
 
 /* Attempt to set the log format given a command line option argument.
@@ -932,14 +981,14 @@ set_log_format_str (const char *oarg) {
   if (type == -1 && is_json_log_format (oarg)) {
     conf.is_json_log_format = 1;
     conf.log_format = unescape_str (oarg);
-    contains_specifier ();      /* set flag */
+    contains_specifier (); /* set flag */
     return;
   }
 
   /* type not found, use whatever was given by the user then */
   if (type == -1) {
     conf.log_format = unescape_str (oarg);
-    contains_specifier ();      /* set flag */
+    contains_specifier (); /* set flag */
     return;
   }
 
@@ -953,7 +1002,7 @@ set_log_format_str (const char *oarg) {
     conf.is_json_log_format = 1;
 
   conf.log_format = unescape_str (fmt);
-  contains_specifier ();        /* set flag */
+  contains_specifier (); /* set flag */
 
   /* assume we are using the default date/time formats */
   set_time_format_str (oarg);

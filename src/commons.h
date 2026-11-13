@@ -6,7 +6,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -43,7 +43,7 @@
 #define __attribute__(x) /**/
 #endif
 #define GO_UNUSED __attribute__((unused))
-#define GO_VERSION 		"1.5.2"
+#define GO_VERSION 		"1.12"
 #define GO_WEBSITE 		"https://goaccess.io/"
 extern struct tm now_tm;
 
@@ -52,15 +52,21 @@ extern struct tm now_tm;
 
 /* total number of modules */
 #ifdef HAVE_GEOLOCATION
-#define TOTAL_MODULES    18
+#define TOTAL_MODULES    19
 #else
 #define TOTAL_MODULES    17
 #endif
 
 /* maximum number of items within a panel */
-#define MAX_CHOICES      366
+#define MAX_CHOICES          366
 /* real-time */
-#define MAX_CHOICES_RT    50
+#define MAX_CHOICES_RT        50
+/* real-time sub-items */
+#define MAX_CHOICES_SUB_RT    10
+/* Preserve one decimal place when sharing a live requests-per-second rate. */
+#define REQUEST_RATE_SCALE    10ULL
+/* max default items when date-spec = min */
+#define MAX_CHOICES_MINUTE  1440 /* 24hrs */
 
 /* date and time length - e.g., 2016/12/12 12:12:12 -0600 */
 #define DATE_TIME     25 + 1
@@ -101,16 +107,52 @@ typedef enum MODULES {
   VIRTUAL_HOSTS,
   REFERRERS,
   REFERRING_SITES,
-  KEYPHRASES,
   STATUS_CODES,
   REMOTE_USER,
   CACHE_STATUS,
 #ifdef HAVE_GEOLOCATION
   GEO_LOCATION,
+  ASN,
 #endif
   MIME_TYPE,
   TLS_TYPE,
+  UTM_CAMPAIGNS,
 } GModule;
+
+/* Total number of per-module storage slots (first GSMetric entries) */
+#define GSMTRC_TOTAL 7
+/* Total number of per-date global storage metrics (MTRC_UNIQUE_KEYS..MTRC_CNT_VISITORS) */
+#define GLOBAL_METRICS_TOTAL 6
+
+/* Enumerated Storage Metrics
+ *
+ * The first GSMTRC_TOTAL entries are physical store slots and index directly
+ * into the per-module metrics array; their order must match module_metrics[].
+ * The MTRC_ROOT..MTRC_PROTOCOLS entries are logical metrics packed into the
+ * MTRC_METRICS slot. The remaining entries are per-date global metrics. */
+typedef enum GSMetric_ {
+  MTRC_KEYMAP,
+  MTRC_ROOTMAP,
+  MTRC_DATAMAP,
+  MTRC_UNIQMAP,
+  MTRC_METRICS,
+  MTRC_AGENTS,
+  MTRC_METADATA,
+  MTRC_ROOT,
+  MTRC_HITS,
+  MTRC_VISITORS,
+  MTRC_BW,
+  MTRC_CUMTS,
+  MTRC_MAXTS,
+  MTRC_METHODS,
+  MTRC_PROTOCOLS,
+  MTRC_UNIQUE_KEYS,
+  MTRC_AGENT_KEYS,
+  MTRC_AGENT_VALS,
+  MTRC_CNT_VALID,
+  MTRC_CNT_BW,
+  MTRC_CNT_VISITORS,
+} GSMetric;
 
 /* Metric totals. These are metrics that have a percent value and are
  * calculated values. */
@@ -135,13 +177,7 @@ typedef struct GMetrics {
 
   uint64_t hits;
   uint64_t visitors;
-
-  /* holder has a numeric value, while
-   * dashboard has a displayable string value */
-  union {
-    char *sbw;
-    uint64_t nbw;
-  } bw;
+  uint64_t nbw;
 
   /* holder has a numeric value, while
    * dashboard has a displayable string value */
@@ -165,20 +201,24 @@ typedef struct GMetrics {
   } maxts;
 } GMetrics;
 
+/* Forward declaration for recursive sub-items */
+typedef struct GSubList_ GSubList;
+
 /* Holder sub item */
 typedef struct GSubItem_ {
   GModule module;
   GMetrics *metrics;
+  GSubList *sub_list;
   struct GSubItem_ *prev;
   struct GSubItem_ *next;
 } GSubItem;
 
 /* Double linked-list of sub items */
-typedef struct GSubList_ {
-  int size;
+struct GSubList_ {
+  uint32_t size;
   struct GSubItem_ *head;
   struct GSubItem_ *tail;
-} GSubList;
+};
 
 /* Holder item */
 typedef struct GHolderItem_ {
@@ -190,11 +230,19 @@ typedef struct GHolderItem_ {
 typedef struct GHolder_ {
   GHolderItem *items;           /* holder items */
   GModule module;               /* current module  */
-  int idx;                      /* holder index  */
-  int holder_size;              /* number of allocated items */
+  uint32_t idx;                 /* holder index  */
+  uint32_t holder_size;         /* number of allocated items */
   uint32_t ht_size;             /* size of the hash table/store */
-  int sub_items_size;           /* number of sub items  */
+  uint32_t sub_items_size;      /* number of sub items  */
+  uint32_t max_choices;         /* max items at root level */
+  uint32_t max_choices_sub;     /* max items at sub-item levels */
 } GHolder;
+
+/* Runtime-only summary metrics produced while following live logs. */
+typedef struct GRealtimeStats_ {
+  uint64_t request_rate;        /* requests per second multiplied by REQUEST_RATE_SCALE */
+  int enabled;                  /* non-zero when live request-rate sampling is active */
+} GRealtimeStats;
 
 /* Enum-to-string */
 typedef struct GEnum_ {
@@ -233,10 +281,11 @@ extern int module_list[TOTAL_MODULES];
 GAgents *new_gagents (uint32_t size);
 void free_agents_array (GAgents *agents);
 
-char *enum2str (const GEnum map[], int len, int idx);
-char *get_module_str (GModule module);
+const char *enum2str (const GEnum map[], int len, int idx);
+const char *get_module_str (GModule module);
 float get_percentage (unsigned long long total, unsigned long long hit);
-int get_max_choices (void);
+uint32_t get_max_choices (void);
+uint32_t get_max_choices_sub (void);
 int get_module_enum (const char *str);
 int has_timestamp (const char *fmt);
 int str2enum (const GEnum map[], int len, const char *str);

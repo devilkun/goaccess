@@ -1,8 +1,60 @@
-Copyright (C) 2009-2021
+Copyright (C) 2009-2026
 Gerardo Orellana <goaccess@prosoftcorp.com>
 
 * Version history:
-    - 1.5.2 [TBD]
+    - 1.12 [Wednesday, September 16, 2026]
+        . GoAccess 1.12 Released. See ChangeLog for new features/bug-fixes.
+    - 1.11 [Sunday, July 19, 2026]
+        . GoAccess 1.11 Released. See ChangeLog for new features/bug-fixes.
+    - 1.10.2 [Tuesday, March 31, 2026]
+        . GoAccess 1.10.2 Released. See ChangeLog for new features/bug-fixes.
+    - 1.10.1 [Saturday, Feb 14, 2026]
+        . GoAccess 1.10.1 Released. See ChangeLog for new features/bug-fixes.
+    - 1.10 [Tuesday, Feb 10, 2026]
+        . GoAccess 1.10 Released. See ChangeLog for new features/bug-fixes.
+    - 1.9.4 [Monday, Mar 31, 2025]
+        . GoAccess 1.9.4 Released. See ChangeLog for new features/bug-fixes.
+    - 1.9.3 [Friday, May 31, 2024]
+        . GoAccess 1.9.3 Released. See ChangeLog for new features/bug-fixes.
+    - 1.9.2 [Friday, April 12, 2024]
+        . GoAccess 1.9.2 Released. See ChangeLog for new features/bug-fixes.
+    - 1.9.1 [Tuesday, February 05, 2024]
+        . GoAccess 1.9.1 Released. See ChangeLog for new features/bug-fixes.
+    - 1.9 [Tuesday, January 30, 2024]
+        . GoAccess 1.9 Released. See ChangeLog for new features/bug-fixes.
+    - 1.8.1 [Tuesday, October 31, 2023]
+        . GoAccess 1.8.1 Released. See ChangeLog for new features/bug-fixes.
+    - 1.8 [Saturday, September 30, 2023]
+        . GoAccess 1.8 Released. See ChangeLog for new features/bug-fixes.
+    - 1.7.2 [Friday, March 31, 2023]
+        . GoAccess 1.7.2 Released. See ChangeLog for new features/bug-fixes.
+    - 1.7.1 [Tuesday, February 28, 2023]
+        . GoAccess 1.7.1 Released. See ChangeLog for new features/bug-fixes.
+    - 1.7 [Saturday, December 31 , 2022]
+        . GoAccess 1.7 Released. See ChangeLog for new features/bug-fixes.
+    - 1.6.5 [Monday, October 31 , 2022]
+        . GoAccess 1.6.5 Released. See ChangeLog for new features/bug-fixes.
+    - 1.6.4 [Friday, September 30 , 2022]
+        . GoAccess 1.6.4 Released. See ChangeLog for new features/bug-fixes.
+    - 1.6.3 [Thursday, August 31 , 2022]
+        . GoAccess 1.6.3 Released. See ChangeLog for new features/bug-fixes.
+    - 1.6.2 [Thursday, July 14 , 2022]
+        . GoAccess 1.6.2 Released. See ChangeLog for new features/bug-fixes.
+    - 1.6.1 [Thursday, June 30 , 2022]
+        . GoAccess 1.6.1 Released. See ChangeLog for new features/bug-fixes.
+    - 1.6 [Tuesday, May 31 , 2022]
+        . GoAccess 1.6 Released. See ChangeLog for new features/bug-fixes.
+    - 1.5.7 [Thursday, April 28 , 2022]
+        . GoAccess 1.5.7 Released. See ChangeLog for new features/bug-fixes.
+    - 1.5.6 [Wednesday, March 30, 2022]
+        . GoAccess 1.5.6 Released. See ChangeLog for new features/bug-fixes.
+    - 1.5.5 [Monday, January 31, 2022]
+        . GoAccess 1.5.5 Released. See ChangeLog for new features/bug-fixes.
+    - 1.5.4 [Saturday, December 25, 2021]
+        . GoAccess 1.5.4 Released. See ChangeLog for new features/bug-fixes.
+    - 1.5.3 [Thursday, November 25, 2021]
+        . GoAccess 1.5.3 Released. See ChangeLog for new features/bug-fixes.
+    - 1.5.2 [Tuesday, Sep 28, 2021]
         . GoAccess 1.5.2 Released. See ChangeLog for new features/bug-fixes.
     - 1.5.1 [Wednesday, Jun 30, 2021]
         . GoAccess 1.5.1 Released. See ChangeLog for new features/bug-fixes.

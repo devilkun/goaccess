@@ -6,7 +6,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -32,24 +32,43 @@
 
 #define KEY_FOUND       1
 #define KEY_NOT_FOUND  -1
-#define LINE_BUFFER     4096    /* read at most this num of chars */
-#define NUM_TESTS       20      /* test this many lines from the log */
+#define LINE_BUFFER     4096 /* read at most this num of chars */
+#define NUM_TESTS       20 /* test this many lines from the log */
 #define MAX_LOG_ERRORS  20
 #define READ_BYTES      4096u
-#define MAX_BATCH_LINES 8192u   /* max number of lines to read per batch before a reflow */
+#define MAX_BATCH_LINES 8192u /* max number of lines to read per batch before a reflow */
+#define MAX_MIME_OUT    256
 
 #define LINE_LEN          23
 #define ERROR_LEN        255
-#define REF_SITE_LEN     511    /* maximum length of a referring site */
+#define REF_SITE_LEN     511 /* maximum length of a referring site */
 #define CACHE_STATUS_LEN   7
-#define HASH_HEX          64
 
-#define SPEC_TOKN_NUL    0x1
-#define SPEC_TOKN_INV    0x2
-#define SPEC_SFMT_MIS    0x3
+#define ERR_SPEC_TOKN_NUL          0x1
+#define ERR_SPEC_TOKN_INV          0x2
+#define ERR_SPEC_SFMT_MIS          0x3
+#define ERR_SPEC_LINE_INV          0x4
+#define ERR_LOG_NOT_FOUND          0x5
+#define ERR_LOG_REALLOC_FAILURE    0x6
+#define ERR_SPEC_VHOST_PORT        0x7
+
+
+#include <stdio.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
 #include "commons.h"
 #include "gslist.h"
+#include "fileio.h"
+#include "sha256.h"
+#include "utm.h"
+
+typedef struct GLogProp_ {
+  char *filename;               /* filename including path */
+  char *fname;                  /* basename(filename) */
+  uint64_t inode;               /* inode of the log */
+  uint64_t size;                /* original size of log */
+} GLogProp;
 
 /* Log properties. Note: This is per line parsed */
 typedef struct GLogItem_ {
@@ -58,9 +77,10 @@ typedef struct GLogItem_ {
   char *browser_type;
   char *continent;
   char *country;
+  char *city;
+  char *asn;
   char *date;
   char *host;
-  char *keyphrase;
   char *method;
   char *os;
   char *os_type;
@@ -69,26 +89,31 @@ typedef struct GLogItem_ {
   char *ref;
   char *req;
   char *req_key;
-  char *status;
+  int status;
   char *time;
-  char *uniq_key;
+  uint64_t uniq_key;
   char *vhost;
   char *userid;
   char *cache_status;
+  char *utm_path;
+
+  GUTM utm;
 
   char site[REF_SITE_LEN + 1];
-  char agent_hex[HASH_HEX];
 
   uint64_t resp_size;
   uint64_t serve_time;
 
+  uint32_t asn_number;
   uint32_t numdate;
   uint32_t agent_hash;
+  int asn_resolved;             /* 0: not run, 1: not found, 2: found. */
   int ignorelevel;
   int type_ip;
   int is_404;
   int is_static;
   int uniq_nkey;
+  int uniq_first;
   int agent_nkey;
 
   /* UMS */
@@ -96,6 +121,8 @@ typedef struct GLogItem_ {
   char *tls_type;
   char *tls_cypher;
   char *tls_type_cypher;
+  char *tls_type_cypher_group;
+  char *tls_group;
 
   char *errstr;
   struct tm dt;
@@ -106,32 +133,31 @@ typedef struct GLastParse_ {
   int64_t ts;
   uint64_t size;
   uint16_t snippetlen;
-  char snippet[READ_BYTES + 1];
+  uint8_t fingerprint[SHA256_DIGEST_SIZE];
 } GLastParse;
 
 /* Overall parsed log properties */
 typedef struct GLog_ {
   uint8_t piping:1;
-  uint8_t log_erridx;
-  uint32_t read;                /* lines read/parsed */
-  uint32_t inode;               /* inode of the log */
+  _Atomic uint8_t log_erridx;
+  _Atomic uint32_t read;        /* lines read/parsed */
   uint64_t bytes;               /* bytes read on each iteration */
-  uint64_t size;                /* original size of log */
   uint64_t length;              /* length read from the log so far */
-  uint64_t invalid;             /* invalid lines for this log */
+  _Atomic uint64_t invalid;     /* invalid lines for this log */
   uint64_t processed;           /* lines proceeded for this log */
 
-  /* file test for persisted/restored data */
   uint16_t snippetlen;
   char snippet[READ_BYTES + 1];
-
-  GLogItem *items;
+  /* A prior run may have fingerprinted a shorter prefix before the file grew. */
+  uint16_t restore_snippetlen;
+  uint8_t restore_fingerprint[SHA256_DIGEST_SIZE];
   GLastParse lp;
-
-  char *filename;
+  GLogProp props;
+  struct tm start_time;
+  char *fname_as_vhost;
   char **errors;
-
   FILE *pipe;
+  pthread_mutex_t error_mutex;  // Add mutex for error array
 } GLog;
 
 /* Container for all logs */
@@ -141,9 +167,19 @@ typedef struct Logs_ {
   uint64_t *processed;
   uint64_t offset;
   int size;                     /* num items */
+  int idx;
   char *filename;
   GLog *glog;
 } Logs;
+
+/* Pthread jobs for multi-thread */
+typedef struct GJob_ {
+  _Atomic uint32_t cnt;         // Make atomic
+  int p, test, dry_run, running;
+  GLog *glog;
+  GLogItem **logitems;
+  char **lines;
+} GJob;
 
 /* Raw data field type */
 typedef enum {
@@ -167,24 +203,30 @@ typedef struct GRawData_ {
   datatype type;
   int idx;                      /* first level index */
   int size;                     /* total num of items on ht */
+  int capacity;                 /* max items retained from the ht */
 } GRawData;
 
 
-char *extract_by_delim (char **str, const char *end);
-char *fgetline (FILE * fp);
+char *extract_by_delim (const char **str, const char *end);
+char *gfile_getline (GFileHandle * fh);
 char **test_format (Logs * logs, int *len);
+int parse_line (GLog * glog, char *line, int dry_run, GLogItem ** logitem_out);
 int parse_log (Logs * logs, int dry_run);
-int pre_process_log (GLog * glog, char *line, int dry_run);
-int set_initial_persisted_data (GLog * glog, FILE * fp, const char *fn);
+int set_glog (Logs * logs, const char *filename);
+int set_initial_persisted_data (GLog * glog, GFileHandle * fh, const char *fn);
+int set_log (Logs * logs, const char *value);
+void free_glog (GLogItem * logitem);
 void free_logerrors (GLog * glog);
 void free_logs (Logs * logs);
 void free_raw_data (GRawData * raw_data);
 void output_logerrors (void);
+void *process_lines_thread (void *arg);
 void reset_struct (Logs * logs);
 
 GLogItem *init_log_item (GLog * glog);
 GRawDataItem *new_grawdata_item (unsigned int size);
 GRawData *new_grawdata (void);
 Logs *init_logs (int size);
+Logs *new_logs (int size);
 
 #endif

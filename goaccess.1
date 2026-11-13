@@ -1,4 +1,4 @@
-.TH goaccess 1 "JUNE 2021" GNU+Linux "User Manuals"
+.TH goaccess 1 "JUL 2026" GNU+Linux "User Manuals"
 .SH NAME
 goaccess \- fast web log analyzer and interactive viewer.
 .SH SYNOPSIS
@@ -6,17 +6,17 @@ goaccess \- fast web log analyzer and interactive viewer.
 .B goaccess [filename] [options...] [-c][-M][-H][-q][-d][...]
 .SH DESCRIPTION
 .B goaccess
-GoAccess is an open source real-time web log analyzer and interactive viewer
-that runs in a
+is an open source, real-time log analyzer and
+interactive viewer that runs in a
 .I terminal
-in *nix systems or through your
+on *nix systems or directly in your
 .I browser.
-.P
-It provides fast and valuable HTTP statistics for system administrators that
-require a visual server report on the fly.
-.P
-GoAccess parses the specified web log file and outputs the data to the X
-terminal. Features include:
+Designed with system administrators, DevOps engineers, and security
+professionals in mind, it delivers fast, actionable HTTP statistics and visual
+server reports on the fly. GoAccess parses your web server logs in real time
+and presents the data directly in the terminal or via a live HTML dashboard,
+making it easy to monitor traffic, detect anomalies, and troubleshoot issues
+instantly.
 
 .IP "General Statistics:"
 This panel gives a summary of several metrics, such as the number of valid and
@@ -31,8 +31,9 @@ crawlers/spiders.
 .IP
 Optionally, date specificity can be set to the hour level using
 .I --date-spec=hr
-which will display dates such as 05/Jun/2016:16. This is great if you want to
-track your daily traffic at the hour level.
+which will display dates such as 05/Jun/2016:16, or to the minute level
+producing 05/Jun/2016:16:59. This is great if you want to track your daily
+traffic at the hour or minute level.
 .IP "Requested files"
 This panel displays the most requested (non-static) files on your web server.
 It shows hits, unique visitors, and percentage, along with the cumulative
@@ -84,18 +85,16 @@ by default.
 .IP "Referring Sites"
 This panel will display only the host part but not the whole URL. The URL where
 the request came from.
-.IP "Keyphrases"
-It reports keyphrases used on Google search, Google cache, and Google translate
-that have lead to your web server. At present, it only supports Google search
-queries via HTTP. See `--ignore-panel` in your configuration file to enable it.
-.I disabled
-by default.
 .IP "Geo Location"
 Determines where an IP address is geographically located. Statistics are broken
-down by continent and country. It needs to be compiled with GeoLocation
-support.
+down by continent and country, and when city-level GeoIP data is available it
+also lists the individual cities for each hit. It needs to be compiled with
+GeoLocation support.
 .IP "HTTP Status Codes"
 The values of the numeric status code to HTTP requests.
+.IP "ASN"
+This panel displays ASN (Autonomous System Numbers) data for GeoIP2 and legacy
+databases. Great for detecting malicious traffic and blocking accordingly.
 .IP "Remote User (HTTP authentication)"
 This is the userid of the person requesting the document as determined by HTTP
 authentication. If the document is not password protected, this part will be
@@ -108,8 +107,10 @@ want to know if your request is being cached and served from the cache. This
 panel shows the cache status of the object the server served. This panel is not
 enabled unless
 .I %C
-is given within the log-format variable. The status can be either
- `MISS`, `BYPASS`, `EXPIRED`, `STALE`, `UPDATING`, `REVALIDATED` or `HIT`
+is given within the log-format variable. The status can be
+`MISS`, `BYPASS`, `EXPIRED`, `STALE`, `UPDATING`, `REVALIDATED`, `HIT` or
+`INVALIDATED`. Apache cache-status messages are also recognized and grouped
+under these statuses.
 .IP "MIME Types"
 This panel specifies Media Types (formerly known as MIME types) and Media
 Subtypes which will be assigned and listed underneath. This panel is not
@@ -119,10 +120,24 @@ is given within the log-format variable. See
 https://www.iana.org/assignments/media-types/media-types.xhtml for more
 details.
 .IP "Encryption Settings"
-This panel shows the SSL/TLS protocol used along the Cipher Suites. This panel
-is not enabled unless
+This panel shows the SSL/TLS protocol and cipher suite. If
+.I %g
+is present, the negotiated key exchange group is nested beneath its cipher
+suite, or directly beneath the protocol when no cipher is available. This
+panel is not enabled unless
 .I %K
 is given within the log-format variable.
+.IP "UTM Campaigns"
+This panel groups campaign traffic by medium, source, campaign, content, and
+term. It also recognizes campaign ID, source platform, creative format, and
+marketing tactic parameters when present. Values are extracted from the
+requested URL and displayed as an expandable hierarchy.
+
+.P
+GoAccess panels can be reordered and their subitems expanded or collapsed from
+the terminal interface, keeping the most important metrics front and center.
+Chart metrics and scales are also adjustable on the fly via the interactive
+menu described below.
 
 .P
 .I NOTE:
@@ -162,8 +177,14 @@ will utilize the enhanced GeoIP2 databases.
 Dynamically expands line buffer in order to parse full line requests instead of
 using a fixed size buffer of 4096.
 .TP
+\fB\-\-with-zlib
+Build with zlib support for reading gzipped logs. Disabled by default.
+.TP
 \fB\-\-with-openssl
 Compile GoAccess with OpenSSL support for its WebSocket server.
+\fB\-\-with-zlib
+Enables optional zlib support to allow parsing of compressed log files
+(e.g., .gz) directly without manual decompression.
 .SH OPTIONS
 .P
 The following options can be supplied to the command or specified in the
@@ -203,35 +224,75 @@ If the timestamp is given in milliseconds
 .I %*
 must be used as date-format.
 .TP
+\fB\-\-datetime-format=<date_time_format>
+The date and time format combines the two variables into a single option. This
+gives the ability to get the timezone from a request and convert it to another
+timezone for output. See
+.I --tz=<timezone>
+.IP
+They all begin with a percentage (%) sign. See `man strftime`. e.g.,
+.I %d/%b/%Y:%H:%M:%S %z.
+.IP
+Note that if --datetime-format is used,
+.I %x
+must be passed in the log-format variable to represent the date and time field.
+.TP
 \fB\-\-log-format=<logformat>
 The log-format variable followed by a space or
 .I \\\\t
 for tab-delimited, specifies the log format string.
 
-Note that if there are spaces within the format, the string needs to be
-enclosed in single/double quotes. Inner quotes need to be escaped.
+On the command line, a format containing spaces must be enclosed in quotes so
+the shell passes it as a single argument. Outer shell quotes must not be copied
+to the configuration file, where the value is read literally. For example:
+.nf
+log-format { "ClientHost": "%h", "DownstreamContentSize": "%b" }
+.fi
+.IP
+A JSON log-format must itself be valid JSON. Therefore, format specifiers must
+be enclosed in double quotes, including specifiers for values that are numbers
+in the input log, such as
+.I \(dqDownstreamContentSize\(dq: \(dq%b\(dq.
+The corresponding input value may still be a JSON number.
 .IP
 In addition to specifying the raw log/date/time formats, for simplicity, any of
 the following predefined log format names can be supplied to the
 log/date/time-format variables. GoAccess can also handle one predefined name in
 one variable and another predefined name in another variable.
 .IP
-  COMBINED     - Combined Log Format,
-  VCOMBINED    - Combined Log Format with Virtual Host,
-  COMMON       - Common Log Format,
-  VCOMMON      - Common Log Format with Virtual Host,
-  W3C          - W3C Extended Log File Format,
-  SQUID        - Native Squid Log Format,
-  CLOUDFRONT   - Amazon CloudFront Web Distribution,
-  CLOUDSTORAGE - Google Cloud Storage,
-  AWSELB       - Amazon Elastic Load Balancing,
-  AWSS3        - Amazon Simple Storage Service (S3)
-  CADDY        - Caddy's JSON Structured format
+  COMBINED       - Combined Log Format,
+  VCOMBINED      - Combined Log Format with full Virtual Host field,
+  VCOMBINED_PORT - Combined Log Format with required colon-delimited port,
+  COMMON         - Common Log Format,
+  VCOMMON        - Common Log Format with full Virtual Host field,
+  VCOMMON_PORT   - Common Log Format with required colon-delimited port,
+  W3C            - W3C Extended Log File Format,
+  SQUID          - Native Squid Log Format,
+  CLOUDFRONT     - Amazon CloudFront standard logs (legacy fixed schema),
+  CLOUDSTORAGE   - Google Cloud Storage,
+  AWSELB         - Amazon Elastic Load Balancing,
+  AWSS3          - Amazon Simple Storage Service (S3)
+  AWSALB         - Amazon Application Load Balancer
+  CADDY          - Caddy JSON structured access logs
+  TRAEFIKCLF     - Traefik's CLF flavor
+.IP
+VCOMBINED and VCOMMON preserve the complete whitespace-delimited Virtual Host
+field, including a port when present. Their _PORT variants require a separate
+colon-delimited port and omit it from the reported Virtual Host value.
+.IP
+.I Note:
+Generally, you need quotes around values that include white spaces, commas,
+pipes, quotes, and/or brackets. Inner quotes must be escaped.
 .IP
 .I Note:
 Piping data into GoAccess won't prompt a log/date/time configuration dialog,
 you will need to previously define it in your configuration file or in the
 command line.
+.IP
+.I Note:
+The default GoAccess format for CADDY is the 'local/info' format. Nevertheless,
+if needed, you have the option to utilize a custom GoAccess log format to match
+your particular configuration.
 .SS
 USER INTERFACE OPTIONS
 .TP
@@ -245,7 +306,7 @@ Color highlight active terminal panel.
 \fB\-m \-\-with-mouse
 Enable mouse support on main terminal dashboard.
 .TP
-\fB\-\-\-color=<fg:bg[attrs, PANEL]>
+\fB\-\-color=<fg:bg[attrs, PANEL]>
 Specify custom colors for the terminal output.
 
 .I Color Syntax
@@ -353,15 +414,13 @@ value of 366 (or 50 in the real-time HTML output) items per panel.
 Turn off colored output. This is the default output on terminals that do not
 support colors.
 .TP
-\fB\-\-no-column-names
-Don't write column names in the terminal output. By default, it displays column
-names for each available metric in every panel.
-.TP
 \fB\-\-no-csv-summary
 Disable summary metrics on the CSV output.
 .TP
 \fB\-\-no-progress
-Disable progress metrics [total requests/requests per second].
+Disable parsing and hostname resolution progress metrics. Parsing progress
+shows total requests and requests per second. Hostname resolution progress
+shows resolved, total and pending hostnames.
 .TP
 \fB\-\-no-tab-scroll
 Disable scrolling through panels when TAB is pressed or when a panel is
@@ -371,21 +430,56 @@ selected using a numeric key.
 Do not show the last updated field displayed in the HTML generated report.
 .TP
 \fB\-\-no-parsing-spinner
-Do now show the progress metrics and parsing spinner.
+Do not show the progress metrics or the parsing spinner.
+.TP
+\fB\-\-tz=<timezone>
+Outputs the report date/time data in the given timezone. Note that it uses the
+canonical timezone name. e.g.,
+.I Europe/Berlin
+or
+.I America/Chicago
+or
+.I Africa/Cairo
+If an invalid timezone name is given, the output will be in GMT. See
+.I --datetime-format
+in order to properly specify a timezone in the date/time format.
 .SS
 SERVER OPTIONS
+.P
+.I Note
+This is just a WebSocket server to provide the raw real-time data.
+It is not a WebServer itself. To access your reports html file, you will
+still need your own HTTP server, place the generated report in it's document
+root dir and open the html file in your browser. The browser will then open
+another WebSocket-connection to the ws-server you may setup here,
+to keep the dashboard up-to-date.
 .TP
-\fB\-\-addr
+\fB\-\-addr=<addr>
 Specify IP address to bind the server to. Otherwise it binds to 0.0.0.0.
 .IP
 Usually there is no need to specify the address, unless you intentionally would
 like to bind the server to a different address within your server.
+.TP
+\fB\-\-unix-socket=<addr>
+Specify the UNIX-domain socket address to bind the server to. It is used
+instead of
+.BR \-\-addr
+and
+.BR \-\-port .
 .TP
 \fB\-\-daemonize
 Run GoAccess as daemon (only if \fB\-\-real-time-html enabled).
 .IP
 Note: It's important to make use of absolute paths across GoAccess'
 configuration.
+.IP
+When upgrading an existing daemon installation, check generated HTML reports
+and external JavaScript/CSS assets for write access by untrusted users, and
+FIFOs for access by other users. Stop GoAccess, remove affected generated files
+and FIFOs, then restart to recreate them with a suitable umask (for example,
+022 for web-readable reports or 077 for private reports). Upgrading does not
+change existing file permissions. Existing FIFOs must belong to the user
+running GoAccess and have no group or other permissions.
 .TP
 \fB\-\-user-name=<username>
 Run GoAccess as the specified user.
@@ -411,6 +505,189 @@ Enable real-time HTML output.
 .IP
 GoAccess uses its own WebSocket server to push the data from the server to the
 client. See http://gwsocket.io for more details how the WebSocket server works.
+.IP
+While following live logs, the General panel displays the total requests and
+the current requests-per-second rate in the same summary field. The rate is
+sampled once per second from changes in the total request count and starts after
+the initial log import, so historical parsing throughput is not counted as live
+traffic. The \fB--html-refresh\fR interval controls how often the latest sample
+is sent to the browser, not the rate's sampling window.
+
+.TP
+\fB\-\-ws-auth=<jwt[:secret]> | jwt:verify:secret\fR
+Enable WebSocket authentication using a JSON Web Token (JWT). This option
+supports two formats depending on whether the JWT is locally generated or
+externally fetched and verified:
+.IP
+\fB<jwt[:secret]>\fR: Specifies a static JWT for WebSocket authentication, with
+an optional secret for local generation or validation. If only "jwt" is
+provided (e.g., \fB\-\-ws-auth=jwt\fR), GoAccess generates a JWT using a secret
+sourced from the environment variable \fBGOACCESS_WSAUTH_SECRET\fR or a default
+HS256-compatible secret if unset. If a secret is included (e.g.,
+\fB\-\-ws-auth=jwt:mysecret\fR), it's used directly as the HS256 signing key or
+read from a file if the value is a valid path (e.g.,
+\fB\-\-ws-auth=jwt:/path/to/secret.key\fR).
+.IP
+\fBjwt:verify:secret\fR: Enables verification of an externally fetched JWT
+(e.g., via \fB\-\-ws-auth-url\fR). The "verify" keyword indicates that the JWT
+is provided by an external source, and the secret must be specified for
+validation. The secret can be a direct HS256 key (e.g.,
+\fB\-\-ws-auth=jwt:verify:mysecret\fR), a file path (e.g.,
+\fB\-\-ws-auth=jwt:verify:/path/to/secret.key\fR), or an environment variable
+name (e.g., \fB\-\-ws-auth=jwt:verify:$JWT_SECRET\fR). This format is required
+when using \fB\-\-ws-auth-url\fR and optionally \fB\-\-ws-auth-refresh-url\fR
+to fetch and verify JWTs from external endpoints.
+.IP
+When this option is used, the HTML report will not bootstrap the initial parsed
+data. Instead, it will only display the report if authentication succeeds,
+ensuring secure access to real-time data.
+.IP
+The system processes this option as follows:
+.IP
+For \fB<jwt[:secret]>\fR: If no secret is provided, GoAccess generates a JWT
+locally using the \fBGOACCESS_WSAUTH_SECRET\fR environment variable or a
+default secret. If a secret is specified, it's used to sign the JWT (either
+directly or from a file).
+.IP
+For \fBjwt:verify:secret\fR: The secret is mandatory and used to verify
+externally fetched JWTs. It must match the signing key used by the external
+authentication server (e.g., at \fB\-\-ws-auth-url\fR).
+.IP
+Requires to build GoAccess with
+.I --with-openssl.
+.TP
+\fB\-\-ws-auth-expire=<secs>
+Set the time after which the JWT expires. Defaults to 8 hours (28800 seconds)
+if not specified.
+.IP
+.I Only
+available for locally generated JWT.
+.IP
+Users can specify the expiration time in various formats. The value is
+converted to seconds for JWT expiration validation. Supported formats:
+.RS
+.IP \(bu 4
+"3600"       -> 3600 seconds
+.IP \(bu 4
+"120s"       -> 2 minutes
+.IP \(bu 4
+"24h"        -> 24 hours = 86,400 seconds
+.IP \(bu 4
+"10m"        -> 10 minutes = 600 seconds
+.IP \(bu 4
+"10d"        -> 10 days = 864,000 seconds
+.RE
+.IP
+The expiration time controls how long the JWT remains valid after issuance,
+ensuring secure WebSocket connections.
+.TP
+\fB\-\-ws-auth-url=<url>
+Specifies the URL where GoAccess fetches the initial JWT to authenticate the
+WebSocket connection.
+.IP
+When this option is used, GoAccess sends a GET request to the specified URL to
+fetch an initial JWT. The response must be a JSON object containing
+\fBstatus\fR, \fBaccess_token\fR, \fBrefresh_token\fR, and \fBexpires_in\fR
+fields.
+.IP
+Example: \fB\-\-ws-auth-url=https://site.com/api/get-auth-token\fR
+.IP
+When fetching the token, GoAccess uses
+.I { credentials: 'include' }
+as part of the request to securely retrieve the access token based on the
+user's existing authentication session in your system, ensuring token retrieval
+is safe as long as your users are authenticated.
+.IP
+This option allows you to integrate your existing authentication system with
+the GoAccess dashboard, using token retrieval endpoints.
+.TP
+\fB\-\-ws-auth-refresh-url=<url>
+Specifies the URL where GoAccess fetches a new JWT when the current one is about to expire.
+.IP
+GoAccess proactively refreshes the JWT 60 seconds before expiration by sending
+a POST request with the refresh_token to this URL. If not provided, it defaults
+to the same URL as \fB\-\-ws-auth-url\fR.
+.IP
+Example: \fB\-\-ws-auth-refresh-url=https://site.com/api/refresh-token\fR
+.IP
+The response format should match that of the initial authentication URL.
+.SS "WebSocket Authentication Flow"
+.IP
+GoAccess offers flexible authentication options, supporting both stateless and
+stateful approaches. In the stateless approach, the refresh token is obtained
+without cookies or CSRF protection; your backend validates the refresh token's
+signature and issues a new access token. Alternatively, the stateful approach
+allows the initial fetch to issue JWTs along with a `csrf_token`, which is
+stored in the session. The subsequent refresh request (POST) then performs a
+CSRF check, requiring the `X-CSRF-TOKEN` header to match the session's token.
+.IP
+\fBInitial Authentication:\fR
+.RS
+.IP \(bu 4
+When started with \fB\-\-ws-auth-url=<url>\fR, GoAccess sends a GET request to
+fetch an initial JWT.
+.IP \(bu 4
+The expected successful response format:
+.IP
+    {
+        "status"        : "success",
+        "access_token"  : "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+        "csrf_token"    : "3RRjNeR4RTXHmrV1cECkyUmmKeRxm4lzkI0eq41o",
+        "refresh_token" : "refresh123xyz",
+        "expires_in"    : 3600
+    }
+.IP \(bu 4
+If authentication fails, the endpoint should return:
+.IP
+    {
+        "status": "error",
+        "message": "User not authenticated"
+    }
+.RE
+.IP
+\fBToken Refreshing:\fR
+.RS
+.IP \(bu 4
+GoAccess refreshes the JWT 60 seconds before expiration by sending a POST
+request to the specified URL (defaults to \fB--ws-auth-url\fR if
+\fB--ws-auth-refresh-url\fR is not set):
+.IP
+    { "refresh_token": "refresh123xyz" }
+.IP
+GoAccess supports both stateless and stateful authentication. For stateless, no
+cookies or CSRF are required; your backend validates the refresh token
+signature. For stateful, include a \fBcsrf_token\fR in the initial response;
+GoAccess sends it as \fBX-CSRF-TOKEN\fR in the refresh request, which your
+backend must validate against the session.
+.RE
+.IP
+\fBPeriodic Token Validation:\fR
+.RS
+.IP \(bu 4
+After refreshing, GoAccess confirms the updated JWT's validity with the
+WebSocket server by sending:
+.IP
+    { "action": "validate_token", "token": "current-jwt" }
+.IP \(bu 4
+The WebSocket server tracks the verified JWT's \fBexp\fR claim and closes the
+connection when it expires, even if the client does not send another message.
+.IP \(bu 4
+If token refresh fails or returns an unusable token, the browser clears its
+credentials and closes the authenticated WebSocket connection.
+.RE
+.IP
+\fBImportant Note:\fR For these options to function, you must specify
+\fB\-\-ws-auth=jwt:verify:<secret>\fR where <secret> can be:
+.RS
+.IP \(bu 4
+A path to a file containing the secret key (e.g., /path/to/secret.key)
+.IP \(bu 4
+An environment variable name that holds the secret (e.g., $JWT_SECRET)
+.IP \(bu 4
+The actual HS256 secret key as a string (e.g., mysecretkey123)
+.RE
+.IP
+Example: \fB\-\-ws-auth=jwt:verify:/path/to/secret.key\fR
 .TP
 \fB\-\-ws-url=<[scheme://]url[:port]>
 URL to which the WebSocket server responds. This is the URL supplied to the
@@ -432,6 +709,10 @@ e.g.,
 By default, it will attempt to connect to the generated report's hostname. If
 GoAccess is running on a remote server, the host of the remote server should be
 specified here. Also, make sure it is a valid host and NOT an http address.
+.TP
+\fB\-\-ping-interval=<secs>
+Enable WebSocket ping with specified interval in seconds. This helps prevent
+idle connections getting disconnected.
 .TP
 \fB\-\-fifo-in=<path/file>
 Creates a named pipe (FIFO) that reads from on the given path/file.
@@ -471,6 +752,14 @@ Send all debug messages to the specified file.
 Specify a custom configuration file to use. If set, it will take priority over
 the global configuration file (if any).
 .TP
+\fB\-\-external-assets
+Output HTML assets to external JS/CSS files. Great if you are setting up
+Content Security Policy (CSP). This will create two separate files,
+.I goaccess.js
+and
+.I goaccess.css
+, in the same directory as your report.html file.
+.TP
 \fB\-\-invalid-requests=<filename>
 Log invalid requests to the specified file.
 .TP
@@ -490,10 +779,12 @@ Enable a list of user-agents by host. For faster parsing, do not enable this
 flag.
 .TP
 \fB\-d \-\-with-output-resolver
-Enable IP resolver on HTML|JSON output.
+Enable IP resolver on HTML|JSON|CSV output. Hostname resolution progress is
+shown unless progress metrics are disabled.
 .TP
 \fB\-e \-\-exclude-ip=<IP|IP-range>
-Exclude an IPv4 or IPv6 from being counted.
+Exclude an IPv4 or IPv6 from being counted. Applicable solely during access log
+data processing, it does not exclude persisted data.
 Ranges can be included as well using a dash in between the IPs (start-end).
 .IP
 .I Examples:
@@ -501,6 +792,13 @@ Ranges can be included as well using a dash in between the IPs (start-end).
   exclude-ip 192.168.0.1-192.168.0.100
   exclude-ip ::1
   exclude-ip 0:0:0:0:0:ffff:808:804-0:0:0:0:0:ffff:808:808
+.TP
+\fB\-j \-\-jobs=<1-6>
+This specifies the number of parallel processing threads to be used during the
+execution of the program. It determines the degree of concurrency when
+analyzing log data, allowing for parallel processing of multiple tasks
+simultaneously. It defaults to 1 thread. It's common to set the number of jobs
+based on the available hardware resources, such as the number of CPU cores.
 .TP
 \fB\-H \-\-http-protocol=<yes|no>
 Set/unset HTTP request protocol. This will create a request key containing the
@@ -537,29 +835,101 @@ Add 4xx client errors to the unique visitors count.
 .TP
 \fB\-\-anonymize-ip
 Anonymize the client IP address. The IP anonymization option sets the last
-octet of IPv4 user IP addresses and the last 80 bits of IPv6 addresses to
+octet of IPv4 user IP addresses and the last 64 bits of IPv6 addresses to
 zeros.
 e.g., 192.168.20.100 => 192.168.20.0
 e.g., 2a03:2880:2110:df07:face:b00c::1 => 2a03:2880:2110:df07::
+.IP
+.I Note:
+Host addresses are masked before aggregation and persistence. Addresses with
+the same masked value share a Hosts row; distinct visitors are still counted
+using an 8-byte keyed fingerprint of the original address and user agent hash.
+This deactivates -a and hostname resolution. Geolocation panels and IP filters
+still use the original address while processing the input.
+.IP
+Older host records are masked and combined during restoration. When this
+conversion is saved, the original host and visitor tables are removed only
+after a successful save. Older database formats may also be saved by automatic
+migration. Existing backups and input logs are not modified.
+The database retains its anonymization level, which is automatically applied
+on future restores. An explicitly different level is rejected.
+.IP
+A single random visitor key is stored in IP_PRIVACY.key in --db-path, with
+owner-only permissions. Keep this file with the database when backing up or
+moving it; a missing or invalid key prevents restoration. Older GoAccess
+versions cannot restore the converted database.
+.IP
+Visitor fingerprints are pseudonymous identifiers, not irreversible
+anonymization. Anyone with both the database and IP_PRIVACY.key can test
+candidate addresses and user agents against the stored fingerprints and may
+recover full IP addresses. Treat the database directory and any backup or copy
+that includes the key as sensitive data requiring the same protection as full
+IP addresses. Owner-only permissions on the key do not protect copies made by
+someone who can read it.
+This option does not remove IP addresses or other personal data embedded in
+URLs, referrers, user IDs or other log fields.
+.TP
+\fB\-\-chunk-size=<256-32768>
+This determines the number of lines that form a chunk. This parameter
+influences the size of the data processed concurrently by each thread, allowing
+for parallelization of the file reading and processing tasks. The value of
+chunk-size affects the efficiency of the parallel processing and can be
+adjusted based on factors such as system resources and the characteristics of
+the input data.
+
+.IP
+Low Values: If chunk-size is set too low, it might result in inefficient
+processing. For instance, if each chunk contains a very small number of lines,
+the overhead of managing and coordinating parallel processing might outweigh
+the benefits.
+
+.IP
+Large Values: Conversely, if chunk-size is set too high, it could lead to
+resource exhaustion. Each chunk represents a portion of data that a thread
+processes in parallel. Setting chunk-size to an excessively large value might
+cause memory issues, particularly if there are many parallel threads running
+simultaneously.
+.TP
+\fB\-\-anonymize-level=<1|2|3>
+Specifies the anonymization levels: 1 => default, 2 => strong, 3 => pedantic.
+.TS
+allbox;
+lb lb lb lb
+l l l l.
+Bits-hidden	Level 1	Level 2	Level 3
+T{
+.BR IPv4
+T}	8	16	24
+T{
+.BR IPv6
+T}	64	80	96
+.TE
+
 .TP
 \fB\-\-all-static-files
 Include static files that contain a query string. e.g.,
 /fonts/fontawesome-webfont.woff?v=4.0.3
 .TP
-\fB\-\-browsers-file=<path>
+\fB\-b \-\-browsers-file=<path>
 By default GoAccess parses an "essential/basic" curated list of browsers &
 crawlers. If you need to add additional browsers, use this option.
 Include an additional delimited list of browsers/crawlers/feeds etc.
 See config/browsers.list for an example or
 https://raw.githubusercontent.com/allinurl/goaccess/master/config/browsers.list
 .TP
-\fB\-\-date-spec=<date|hr>
-Set the date specificity to either date (default) or hr to display hours
-appended to the date.
+\fB\-\-concat-vhost-req
+Prepend the virtual host to the request field, so the top requests show which
+virtual host they belong to. It requires the virtual host
+.I %v
+to be part of the log-format variable.
+.TP
+\fB\-\-date-spec=<date|hr|min>
+Set the date specificity to either date (default), hr to display hours or min
+to display minutes appended to the date.
 .IP
 This is used in the visitors panel. It's useful for tracking visitors at the
 hour level. For instance, an hour specificity would yield to display traffic as
-18/Dec/2010:19
+18/Dec/2010:19 or minute specificity 18/Dec/2010:19:59.
 .TP
 \fB\-\-double-decode
 Decode double-encoded values. This includes, user-agent, request, and referrer.
@@ -579,13 +949,19 @@ Enable parsing and displaying the given panel.
   VIRTUAL_HOSTS
   REFERRERS
   REFERRING_SITES
-  KEYPHRASES
   STATUS_CODES
   REMOTE_USER
   CACHE_STATUS
   GEO_LOCATION
   MIME_TYPE
   TLS_TYPE
+  UTM_CAMPAIGNS
+.TP
+\fB\-\-fname-as-vhost=<regex>
+Use log filename(s) as virtual host(s). POSIX regex is passed to extract
+the virtual host from the filename. e.g.,
+.I --fname-as-vhost='[a-z]*\.[a-z]*'
+can be used to extract awesome.com.log => awesome.com.
 .TP
 \fB\-\-hide-referrer=<NEEDLE>
 Hide a referrer but still count it. Wild cards are allowed in the needle. i.e.,
@@ -600,6 +976,9 @@ traffic on your server at specific times.
 .TP
 \fB\-\-ignore-crawlers
 Ignore crawlers from being counted.
+.TP
+\fB\-\-unknowns-as-crawlers
+Classify unknown OS and browsers as crawlers.
 .TP
 \fB\-\-ignore-panel=<PANEL>
 Ignore parsing and displaying the given panel.
@@ -616,16 +995,16 @@ Ignore parsing and displaying the given panel.
   VIRTUAL_HOSTS
   REFERRERS
   REFERRING_SITES
-  KEYPHRASES
   STATUS_CODES
   REMOTE_USER
   CACHE_STATUS
   GEO_LOCATION
   MIME_TYPE
   TLS_TYPE
+  UTM_CAMPAIGNS
 .TP
 \fB\-\-ignore-referrer=<referrer>
-Ignore referers from being counted. Wildcards allowed. e.g.,
+Ignore referrers from being counted. Wildcards allowed. e.g.,
 .I
 *.domain.com
 .I
@@ -708,6 +1087,34 @@ GEOLOCATION OPTIONS
 \fB\-g \-\-std-geoip
 Standard GeoIP database for less memory usage.
 .TP
+\fB\-\-exclude-asn=<ASN>
+Exclude requests whose client address resolves to the given Autonomous System
+Number. The option can be repeated and accepts either the numeric form, such as
+8075, or the AS-prefixed form, such as AS8075.
+
+This option is available only when GoAccess is built with GeoIP2 support and
+requires an ASN database supplied through
+.BR \-\-geoip-database .
+GoAccess exits with an error if ASN exclusions are configured without an
+ASN-capable database. Exclusions apply as records are parsed and do not remove
+matching records already restored from persistent storage.
+.TP
+\fB\-\-include-asn=<ASN>
+Only include requests whose client address resolves to the given Autonomous
+System Number. All other requests, including those whose address does not
+resolve to any ASN (e.g., private addresses), are dropped and counted as
+excluded ASN hits. The option can be repeated and accepts either the numeric
+form, such as 15169, or the AS-prefixed form, such as AS15169. It can be
+combined with
+.BR \-\-exclude-asn ,
+which is applied to the requests that remain.
+
+Like
+.BR \-\-exclude-asn ,
+this option requires GeoIP2 support and an ASN database supplied through
+.BR \-\-geoip-database ,
+and it does not remove records already restored from persistent storage.
+.TP
 \fB\-\-geoip-database=<geofile>
 Specify path to GeoIP database file. i.e., GeoLiteCity.dat.
 
@@ -740,10 +1147,22 @@ PERSISTENCE STORAGE OPTIONS
 \fB\-\-persist
 Persist parsed data into disk. If database files exist, files will be
 overwritten. This should be set to the first dataset. See examples below.
+.IP
+Log resume markers store a SHA-256 fingerprint of the log prefix instead of
+raw log text. Older markers are read automatically and replaced when the
+database is next persisted. After conversion, use an updated GoAccess to
+resume processing; older versions cannot read the new marker format.
+Existing backups are not modified. Use --anonymize-ip to mask stored host
+addresses; sensitive values in other stored fields are not automatically removed.
 .TP
 \fB\-\-restore
 Load previously stored data from disk. If reading persisted data only, the
-database files need to exist. See
+database files need to exist. The
+.I --http-method
+and
+.I --http-protocol
+settings must match those used to create the database because they determine
+how request keys are grouped. See
 .I --persist
 and examples below.
 .TP
@@ -828,11 +1247,23 @@ date field matching the
 variable.
 .IP %v
 The canonical Server Name of the server serving the request (Virtual Host).
+.IP %p
+The server port. It must be a number from 0 through 65535 and is discarded
+after parsing.
 .IP %e
 This is the userid of the person requesting the document as determined by HTTP
 authentication.
 .IP %C
-The cache status of the object the server served.
+The cache status of the object the server served. Accepts short status names
+such as HIT and MISS, or Apache's %{cache-status}e messages. Quote this field
+in the Apache log and use "%C" at the corresponding position in GoAccess's
+log-format, since Apache messages contain spaces.
+.sp
+Apache cache hits map to HIT, conditional cache hits to REVALIDATED, and
+ordinary or conditional cache misses to MISS. Known uncacheable-response
+reasons are also counted as MISS. Cache invalidations are reported separately
+as INVALIDATED. Stale responses that Apache labels as cache hits remain HIT.
+Unrecognized cache values are ignored without discarding the request.
 .IP %h
 host (the client IP address, either IPv4 or IPv6)
 .IP %r
@@ -862,6 +1293,8 @@ The size of the object returned to the client.
 The "Referrer" HTTP request header.
 .IP %u
 The user-agent HTTP request header.
+.IP %g
+The negotiated TLS key exchange group. (In Nginx log_format: $ssl_curve)
 .IP %K
 The TLS encryption settings chosen for the connection. (In Apache LogFormat: %{SSL_PROTOCOL}x)
 .IP %k
@@ -874,6 +1307,8 @@ The time taken to serve the request, in microseconds as a decimal number.
 The time taken to serve the request, in seconds with milliseconds resolution.
 .IP %L
 The time taken to serve the request, in milliseconds as a decimal number.
+.IP %n
+The time taken to serve the request, in nanoseconds.
 .IP %^
 Ignore this field.
 .IP %~
@@ -883,10 +1318,31 @@ The host (the client IP address, either IPv4 or IPv6) in a X-Forwarded-For (XFF)
 
 It uses a special specifier which consists of a tilde before the host
 specifier, followed by the character(s) that delimit the XFF field, which are
-enclosed by curly braces (i.e., ~h{," })
+enclosed by curly braces. i.e., "~h{, }
 
-For example, ~h{," } is used in order to parse "11.25.11.53, 17.68.33.17" field
-which is delimited by a double quote, a comma, and a space.
+For example, "~h{, }" is used in order to parse "11.25.11.53, 17.68.33.17" field
+which is delimited by a comma and a space (enclosed by double quotes).
+
+.TS
+allbox;
+lb lb
+l l.
+XFF field	specifier
+T{
+.BR \[dq]192.1.2.3, \~192.68.33.17,\~192.1.1.2\[dq]
+T}	\[dq]~h{, }\[dq]
+T{
+.BR \[dq]192.1.2.12\[dq],\~\[dq]192.68.33.17\[dq]
+T}	~h{\[dq], }
+T{
+.BR 192.1.2.12,\~192.68.33.17
+T}	~h{, }
+T{
+.BR 192.1.2.14\~192.68.33.17\~192.1.1.2
+T}	~h{ }
+.TE
+
+
 .P
 .I Note:
 In order to get the average, cumulative and maximum time served in GoAccess,
@@ -922,14 +1378,28 @@ Redraw main window.
 Quit the program, current window or collapse active module
 .IP "o or ENTER"
 Expand selected module or open window
+.IP "+"
+Expand the selected item's children when a module is already expanded.
+.IP "-"
+Collapse the selected item's children when a module is already expanded.
 .IP "0-9 and Shift + 0"
 Set selected module to active
+.IP "p"
+Reorder the dashboard panels interactively (press `p` or `P`).
 .IP "j"
 Scroll down within expanded module
 .IP "k"
 Scroll up within expanded module
 .IP "c"
 Set or change scheme color.
+.IP "r"
+Toggle reverse order of chart bars for the active module.
+.IP "m"
+Cycle chart metric forward for the active module (hits, visitors, bandwidth).
+.IP "M"
+Cycle chart metric backward for the active module.
+.IP "l"
+Toggle logarithmic scale for chart bars in the active module.
 .IP "TAB"
 Forward iteration of modules. Starts from current active module.
 .IP "SHIFT + TAB"
@@ -973,190 +1443,186 @@ To generate a CSV file:
 .IP
 # goaccess access.log --no-csv-summary -o report.csv
 .P
-GoAccess also allows great flexibility for real-time filtering and parsing. For
-instance, to quickly diagnose issues by monitoring logs since goaccess was
-started:
+GoAccess also allows real-time monitoring from stdin:
 .IP
 # tail -f access.log | goaccess -
 .P
-And even better, to filter while maintaining opened a pipe to preserve
-real-time analysis, we can make use of
-.I tail -f
-and
-a matching pattern tool such as
-.I grep, awk, sed,
-etc:
+To filter while keeping the pipe open for real-time analysis:
 .IP
 # tail -f access.log | grep -i --line-buffered 'firefox' | goaccess --log-format=COMBINED -
 .P
-or to parse from the beginning of the file while maintaining the pipe opened
-and applying a filter
+Parse from the beginning of the file while maintaining the pipe:
 .IP
 # tail -f -n +0 access.log | grep -i --line-buffered 'firefox' | goaccess --log-format=COMBINED -o report.html --real-time-html -
+.P
+Convert log date timezone to Europe/Berlin:
+.IP
+# goaccess access.log --log-format='%h %^[%x] "%r" %s %b "%R" "%u"' --datetime-format='%d/%b/%Y:%H:%M:%S %z' --tz=Europe/Berlin --date-spec=min
+
 .SS
 MULTIPLE LOG FILES
 .P
-There are several ways to parse multiple logs with GoAccess. The simplest is to
-pass multiple log files to the command line:
+Parse multiple logs by passing them to the command line:
 .IP
 # goaccess access.log access.log.1
 .P
-It's even possible to parse files from a pipe while reading regular files:
+Parse from a pipe while also reading regular files (append \fB-\fR for stdin):
 .IP
 # cat access.log.2 | goaccess access.log access.log.1 -
 .P
 .I Note
-that the single dash is appended to the command line to let GoAccess know that
-it should read from the pipe.
+that the single dash is appended to the command line to let GoAccess know
+that it should read from the pipe.
 .P
-Now if we want to add more flexibility to GoAccess, we can do a series of
-pipes. For instance, if we would like to process all compressed log files
-.I access.log.*.gz
-in addition to the current log file, we can do:
+Process all compressed log files plus the current log:
 .IP
 # zcat access.log.*.gz | goaccess access.log -
 .P
 .I Note:
-On Mac OS X, use gunzip -c instead of zcat.
+On macOS, use \fBgunzip -c\fR instead of \fBzcat\fR.
+.I Note:
+If GoAccess was built with \fB--with-zlib\fR, it can parse
+\fB.gz\fR files directly without external decompression:
+.IP
+# goaccess access.log access.log.1.gz access.log.2.gz
+
 .SS
-REAL TIME HTML OUTPUT
+REAL-TIME HTML OUTPUT
 .P
-GoAccess has the ability to output real-time data in the HTML report. You can
-even email the HTML file since it is composed of a single file with no external
-file dependencies, how neat is that!
-.P
-The process of generating a real-time HTML report is very similar to the
-process of creating a static report. Only --real-time-html is needed to make it
-real-time.
+Generate a real-time HTML report:
 .IP
 # goaccess access.log -o /usr/share/nginx/html/site/report.html --real-time-html
 .P
-By default, GoAccess will use the host name of the generated report.
-Optionally, you can specify the URL to which the client's browser will connect
-to. See https://goaccess.io/faq for a more detailed example.
+Specify the WebSocket URL explicitly:
 .IP
 # goaccess access.log -o report.html --real-time-html --ws-url=goaccess.io
 .P
-By default, GoAccess listens on port 7890, to use a different port other than
-7890, you can specify it as (make sure the port is opened):
+Use a custom port:
 .IP
 # goaccess access.log -o report.html --real-time-html --port=9870
 .P
-And to bind the WebSocket server to a different address other than 0.0.0.0, you
-can specify it as:
+Bind WebSocket to a specific address:
 .IP
 # goaccess access.log -o report.html --real-time-html --addr=127.0.0.1
 .P
 .I Note:
-To output real time data over a TLS/SSL connection, you need to use
-.I --ssl-cert=<cert.crt>
-and
-.I --ssl-key=<priv.key>.
+For TLS/SSL real-time output, use \fB--ssl-cert=<cert.crt>\fR and \fB--ssl-key=<priv.key>\fR.
+If GoAccess is running behind a reverse proxy, set the WebSocket URL to include
+the proxy path and port, e.g.:
+.IP
+# goaccess access.log -o report.html --real-time-html --ws-url=goaccess.io:8080/ws
+
 .SS
 WORKING WITH DATES
 .P
-Another useful pipe would be filtering dates out of the web log
-.P
-The following will get all HTTP requests starting on 05/Dec/2010 until the end
-of the file.
+All requests from a specific date to end of file:
 .IP
 # sed -n '/05\/Dec\/2010/,$ p' access.log | goaccess -a -
 .P
-or using relative dates such as yesterdays or tomorrows day:
+Using a relative date (one week ago):
 .IP
 # sed -n '/'$(date '+%d\/%b\/%Y' -d '1 week ago')'/,$ p' access.log | goaccess -a -
 .P
-If we want to parse only a certain time-frame from DATE a to DATE b, we can do:
+Parse a specific date range:
 .IP
 # sed -n '/5\/Nov\/2010/,/5\/Dec\/2010/ p' access.log | goaccess -a -
 .P
-If we want to preserve only certain amount of data and recycle storage, we can
-keep only a certain number of days. For instance to keep & show the last 5
-days:
+Keep only the last 5 days of data:
 .IP
 # goaccess access.log --keep-last=5
+
 .SS
 VIRTUAL HOSTS
 .P
-Assuming your log contains the virtual host (server blocks) field. For
-instance:
-.IP
-vhost.com:80 10.131.40.139 - - [02/Mar/2016:08:14:04 -0600] "GET /shop/bag-p-20
-HTTP/1.1" 200 6715 "-" "Apache (internal dummy connection)"
+Use \fB--concat-vhost-req\fR to prepend the virtual host or server block (%v) to the request field.
 .P
-And you would like to append the virtual host to the request in order to see
-which virtual host the top urls belong to
+Append virtual host manually:
 .IP
-awk '$8=$1$8' access.log | goaccess -a -
+# awk '$8=$1$8' access.log | goaccess -a -
 .P
-To exclude a list of virtual hosts you can do the following:
+Exclude a list of virtual hosts:
 .IP
 # grep -v "`cat exclude_vhost_list_file`" vhost_access.log | goaccess -
+
 .SS
-FILES & STATUS CODES
+FILES, STATUS CODES & BOTS
 .P
-To parse specific pages, e.g., page views, html, htm, php, etc. within a
-request:
+Parse only specific page types (html, htm, php):
 .IP
 # awk '$7~/\.html|\.htm|\.php/' access.log | goaccess -
 .P
-Note,
-.I $7
-is the request field for the common and combined log format, (without Virtual
-Host), if your log includes Virtual Host, then you probably want to use
-.I $8
-instead. It's best to check which field you are shooting for, e.g.:
+Parse page views without extensions:
 .IP
-# tail -10 access.log | awk '{print $8}'
+# awk '$7!~/\..*$/' access.log | goaccess -
 .P
-Or to parse a specific status code, e.g., 500 (Internal Server Error):
+Filter by a single status code (e.g., 500):
 .IP
 # awk '$9~/500/' access.log | goaccess -
+.P
+Filter by multiple status codes (3xx or 5xx):
+.IP
+# tail -f -n +0 access.log | awk '$9~/3[0-9]{2}|5[0-9]{2}/' | goaccess -o out.html -
+.P
+Estimate bot traffic:
+.IP
+# tail -F -n +0 access.log | grep -i --line-buffered 'bot' | goaccess -
+
 .SS
 SERVER
 .P
-Also, it is worth pointing out that if we want to run GoAccess at lower
-priority, we can run it as:
+Run GoAccess at lower CPU priority:
 .IP
 # nice -n 19 goaccess -f access.log -a
 .P
-and if you don't want to install it on your server, you can still run it from
-your local machine:
+Pipe logs from a remote server:
 .IP
 # ssh -n root@server 'tail -f /var/log/apache2/access.log' | goaccess -
 .P
-Note: SSH requires
-.I -n
-so GoAccess can read from stdin. Also, make sure to use SSH keys for
-authentication as it won't work if a passphrase is required.
+.I Note:
+SSH requires \fB-n\fR so GoAccess can read from stdin. Use SSH keys for
+authentication.
+
 .SS
 INCREMENTAL LOG PROCESSING
 .P
-GoAccess has the ability to process logs incrementally through its internal
-storage and dump its data to disk. It works in the following way:
-
-.nr step 1 1
-.IP \n[step] 3
-A dataset must be persisted first with
-.I --persist,
-then the same dataset can be loaded with
-.IP \n+[step]
-.I --restore.
-If new data is passed (piped or through a log file), it will append it to the
-original dataset.
+GoAccess can process logs incrementally by persisting data to disk, then
+restoring it and appending new data. GoAccess tracks inodes, the last line
+parsed, and the last timestamp per file.
+.P
+.I Note:
+If the inode doesn't match, all lines are parsed. If it matches, remaining
+lines are read and the count/timestamp updated. Log lines with a timestamp ≤
+the stored timestamp are skipped. Piped data works off the timestamp of the
+last line read.
+.P
+.I Warning:
+Piped data may produce duplicate entries since multiple consecutive lines can
+share the same timestamp. Best practice is to parse directly with GoAccess
+rather than piping for incremental processing.
+.P
+Persist last month's log:
+.IP
+# goaccess access.log.1 --persist
+.P
+Append this month's log and preserve:
+.IP
+# goaccess access.log --restore --persist
+.P
+Read persisted data only:
+.IP
+# goaccess --restore
 
 .P
 NOTES
 
 GoAccess keeps track of inodes of all the files processed (assuming files will
-stay on the same partition), in addition, it extracts a snippet of data from
-the log along with the last line parsed of each file and the timestamp of the
-last line parsed. e.g.,
+stay on the same partition). It stores a fingerprint and length of a prefix
+of each log, along with the last line parsed and its timestamp. e.g.,
 inode:29627417|line:20012|ts:20171231235059
 
-First it compares if the snippet matches the log being parsed, if it does, it
-assumes the log hasn't changed dramatically, e.g., hasn't been truncated. If
-the inode does not match the current file, it parses all lines. If the current
+First it compares if the prefix fingerprint matches the log being parsed. If
+it does, it assumes the log hasn't changed dramatically, e.g., hasn't been
+truncated. If the inode does not match the current file, it parses all lines. If the current
 file matches the inode, it then reads the remaining lines and updates the count
 of lines parsed and the timestamp. As an extra precaution, it won't parse log
 lines with a timestamp ≤ than the one stored.
@@ -1191,11 +1657,20 @@ default value of 366 items per panel.
 .P
 A hit is a request (line in the access log), e.g., 10 requests = 10 hits. HTTP
 requests with the same IP, date, and user agent are considered a unique visit.
+.P
+
+If you want to enable dual-stack support, please use
+.I --addr=::
+instead of the default
+.I --addr=0.0.0.0.
+.P
+The generated report will attempt to reconnect to the WebSocket server after 1
+second with exponential backoff. It will attempt to connect 20 times.
 .SH BUGS
 If you think you have found a bug, please send me an email to
 .I goaccess@prosoftcorp.com
 or use the issue tracker in https://github.com/allinurl/goaccess/issues
 .SH AUTHOR
-Gerardo Orellana <goaccess@prosoftcorp.com>
+Gerardo Orellana <hello@goaccess.io>
 For more details about it, or new releases, please visit
 https://goaccess.io

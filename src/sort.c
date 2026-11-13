@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -35,10 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <getopt.h>
-#include <errno.h>
 
-#include "error.h"
 #include "settings.h"
 #include "util.h"
 
@@ -68,8 +65,6 @@ const int sort_choices[][SORT_MAX_OPTS] = {
   {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
   /* REFERRING_SITES */
   {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
-  /* KEYPHRASES */
-  {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
   /* STATUS_CODES */
   {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
   /* REMOTE_USER */
@@ -79,14 +74,18 @@ const int sort_choices[][SORT_MAX_OPTS] = {
 #ifdef HAVE_GEOLOCATION
   /* GEO_LOCATION */
   {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
+  /* ASN */
+  {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
 #endif
   /* MIME_TYPE */
   {SORT_BY_HITS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
   /* TLS_TYPE */
   {SORT_BY_HITS, SORT_BY_DATA, SORT_BY_VISITORS, SORT_BY_BW, -1},
+  /* UTM_CAMPAIGNS */
+  {SORT_BY_HITS, SORT_BY_VISITORS, SORT_BY_DATA, SORT_BY_BW, SORT_BY_AVGTS, SORT_BY_CUMTS, SORT_BY_MAXTS, -1},
 };
 
-static GEnum FIELD[] = {
+static const GEnum FIELD[] = {
   {"BY_HITS"     , SORT_BY_HITS     } ,
   {"BY_VISITORS" , SORT_BY_VISITORS } ,
   {"BY_DATA"     , SORT_BY_DATA     } ,
@@ -98,7 +97,7 @@ static GEnum FIELD[] = {
   {"BY_MTHD"     , SORT_BY_MTHD     } ,
 };
 
-static GEnum ORDER[] = {
+static const GEnum ORDER[] = {
   {"ASC"  , SORT_ASC  } ,
   {"DESC" , SORT_DESC } ,
 };
@@ -115,15 +114,16 @@ GSort module_sort[TOTAL_MODULES] = {
   {VIRTUAL_HOSTS       , SORT_BY_HITS , SORT_DESC } ,
   {REFERRERS           , SORT_BY_HITS , SORT_DESC } ,
   {REFERRING_SITES     , SORT_BY_HITS , SORT_DESC } ,
-  {KEYPHRASES          , SORT_BY_HITS , SORT_DESC } ,
   {STATUS_CODES        , SORT_BY_HITS , SORT_DESC } ,
   {REMOTE_USER         , SORT_BY_HITS , SORT_DESC } ,
   {CACHE_STATUS        , SORT_BY_HITS , SORT_DESC } ,
 #ifdef HAVE_GEOLOCATION
   {GEO_LOCATION        , SORT_BY_HITS , SORT_DESC } ,
+  {ASN                 , SORT_BY_HITS , SORT_DESC } ,
 #endif
   {MIME_TYPE           , SORT_BY_HITS , SORT_DESC } ,
   {TLS_TYPE            , SORT_BY_VISITORS , SORT_DESC } ,
+  {UTM_CAMPAIGNS       , SORT_BY_HITS , SORT_DESC } ,
 };
 /* *INDENT-ON* */
 
@@ -197,7 +197,8 @@ cmp_vis_asc (const void *a, const void *b) {
   return (va > vb) - (va < vb);
 }
 
-/* Sort GRawDataItem value descending */
+/* Sort GRawDataItem value descending. Ties keep the earlier key first so the
+ * top items retained from a table are deterministic. */
 static int
 cmp_raw_num_desc (const void *a, const void *b) {
   const GRawDataItem *ia = a;
@@ -206,7 +207,9 @@ cmp_raw_num_desc (const void *a, const void *b) {
   uint64_t va = ia->hits;
   uint64_t vb = ib->hits;
 
-  return (va < vb) - (va > vb);
+  if (va != vb)
+    return (va < vb) - (va > vb);
+  return (ia->nkey > ib->nkey) - (ia->nkey < ib->nkey);
 }
 
 /* Sort GRawDataItem value descending */
@@ -224,8 +227,8 @@ cmp_bw_desc (const void *a, const void *b) {
   const GHolderItem *ia = a;
   const GHolderItem *ib = b;
 
-  uint64_t va = ia->metrics->bw.nbw;
-  uint64_t vb = ib->metrics->bw.nbw;
+  uint64_t va = ia->metrics->nbw;
+  uint64_t vb = ib->metrics->nbw;
 
   return (va < vb) - (va > vb);
 }
@@ -236,8 +239,8 @@ cmp_bw_asc (const void *a, const void *b) {
   const GHolderItem *ia = a;
   const GHolderItem *ib = b;
 
-  uint64_t va = ia->metrics->bw.nbw;
-  uint64_t vb = ib->metrics->bw.nbw;
+  uint64_t va = ia->metrics->nbw;
+  uint64_t vb = ib->metrics->nbw;
 
   return (va > vb) - (va < vb);
 }
@@ -350,15 +353,16 @@ cmp_mthd_desc (const void *a, const void *b) {
 #if defined(__clang__) && defined(__clang_major__) && (__clang_major__ >= 4)
 __attribute__((no_sanitize ("implicit-conversion", "unsigned-integer-overflow")))
 #endif
-  int cmp_ui32_asc (const void *a, const void *b) {
-  const uint32_t *ia = (const uint32_t *) a;    // casting pointer types
+int
+cmp_ui32_asc (const void *a, const void *b) {
+  const uint32_t *ia = (const uint32_t *) a; // casting pointer types
   const uint32_t *ib = (const uint32_t *) b;
   return *ia - *ib;
-  }
+}
 
 int
 cmp_ui32_desc (const void *a, const void *b) {
-  const uint32_t *ia = (const uint32_t *) a;    // casting pointer types
+  const uint32_t *ia = (const uint32_t *) a; // casting pointer types
   const uint32_t *ib = (const uint32_t *) b;
   return *ib - *ia;
 }
@@ -402,7 +406,7 @@ get_sort_field_str (GSortField field) {
  * The key corresponding to the enumerated field value is returned. */
 const char *
 get_sort_field_key (GSortField field) {
-  static const char *field2key[][2] = {
+  static const char *const field2key[][2] = {
     {"BY_HITS", "hits"},
     {"BY_VISITORS", "visitors"},
     {"BY_DATA", "data"},
@@ -485,7 +489,7 @@ parse_initial_sort (void) {
 
 /* Apply user defined sort */
 void
-sort_holder_items (GHolderItem * items, int size, GSort sort) {
+sort_holder_items (GHolderItem *items, int size, GSort sort) {
   switch (sort.field) {
   case SORT_BY_HITS:
     if (sort.sort == SORT_DESC)
@@ -549,7 +553,7 @@ sort_holder_items (GHolderItem * items, int size, GSort sort) {
  *
  * On success, raw data sorted in a descending order. */
 GRawData *
-sort_raw_num_data (GRawData * raw_data, int ht_size) {
+sort_raw_num_data (GRawData *raw_data, int ht_size) {
   qsort (raw_data->items, ht_size, sizeof *(raw_data->items), cmp_raw_num_desc);
   return raw_data;
 }
@@ -558,7 +562,71 @@ sort_raw_num_data (GRawData * raw_data, int ht_size) {
  *
  * On success, raw data sorted in a descending order. */
 GRawData *
-sort_raw_str_data (GRawData * raw_data, int ht_size) {
+sort_raw_str_data (GRawData *raw_data, int ht_size) {
   qsort (raw_data->items, ht_size, sizeof *(raw_data->items), cmp_raw_str_desc);
   return raw_data;
+}
+
+/* Move a retained raw item up the heap until its parent ranks no higher,
+ * keeping the lowest-ranked retained item at the root. */
+static void
+sift_up_raw_item (GRawDataItem *items, int slot, int (*cmp) (const void *, const void *)) {
+  GRawDataItem item = items[slot];
+  int parent = 0;
+
+  while (slot > 0) {
+    parent = (slot - 1) / 2;
+    if (cmp (&items[parent], &item) >= 0)
+      break;
+
+    items[slot] = items[parent];
+    slot = parent;
+  }
+  items[slot] = item;
+}
+
+/* Move the root raw item down the heap until both of its children rank
+ * higher than it. */
+static void
+sift_down_raw_item (GRawDataItem *items, int size, int (*cmp) (const void *, const void *)) {
+  GRawDataItem item = items[0];
+  int slot = 0, child = 0;
+
+  while ((child = 2 * slot + 1) < size) {
+    /* descend towards the lower-ranked child */
+    if (child + 1 < size && cmp (&items[child + 1], &items[child]) > 0)
+      child++;
+    if (cmp (&item, &items[child]) >= 0)
+      break;
+
+    items[slot] = items[child];
+    slot = child;
+  }
+  items[slot] = item;
+}
+
+/* Add a raw item to an extraction. Once a bounded extraction is full, the
+ * item replaces the lowest-ranked retained item only if it ranks higher, so
+ * memory stays proportional to the capacity rather than to the table size. */
+void
+retain_raw_item (GRawData *raw_data, GRawDataItem item) {
+  int (*cmp) (const void *, const void *) =
+    raw_data->type == STR ? cmp_raw_str_desc : cmp_raw_num_desc;
+  GRawDataItem *items = raw_data->items;
+
+  if (raw_data->idx < raw_data->capacity) {
+    items[raw_data->idx] = item;
+    /* an unbounded extraction is fully sorted afterwards; only a bounded one
+     * needs heap order to locate its lowest-ranked item */
+    if (raw_data->capacity < raw_data->size)
+      sift_up_raw_item (items, raw_data->idx, cmp);
+    raw_data->idx++;
+    return;
+  }
+
+  if (cmp (&item, &items[0]) >= 0)
+    return;
+
+  items[0] = item;
+  sift_down_raw_item (items, raw_data->idx, cmp);
 }

@@ -2,8 +2,8 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([goaccess],[1.5.2],[hello@goaccess.io],[],[https://goaccess.io])
-AM_INIT_AUTOMAKE
+AC_INIT([goaccess],[1.12],[hello@goaccess.io],[],[https://goaccess.io])
+AM_INIT_AUTOMAKE([foreign])
 AC_CONFIG_SRCDIR([src/goaccess.c])
 AC_CONFIG_HEADERS([src/config.h])
 
@@ -48,6 +48,19 @@ esac
 AC_MSG_RESULT([$with_rdyanimc])
 AM_CONDITIONAL([WITH_RDYNAMIC], [test "x$with_rdyanimc" = "xyes"])
 
+# Add ASAN
+AC_CANONICAL_HOST
+AC_ARG_ENABLE([asan],
+  [AS_HELP_STRING([--enable-asan], [Enable address sanitizer])],
+  [with_asan=$enableval], [with_asan=no])
+AC_MSG_CHECKING([whether to build with address sanitizer])
+case "$host_os" in
+  *cygwin*|*aix*|*mingw*) with_asan=no
+  ;;
+esac
+AC_MSG_RESULT([$with_asan])
+AM_CONDITIONAL([WITH_ASAN], [test "x$with_asan" = "xyes"])
+
 # Check for libc implementation on NetBSD
 AC_CHECK_HEADERS([sha.h sha1.h])
 AC_CHECK_FUNCS([SHA1Init])
@@ -61,6 +74,20 @@ if test "$openssl" = 'yes'; then
   AC_CHECK_LIB([crypto], [CRYPTO_free],,[AC_MSG_ERROR([crypto library missing])])
   AC_CHECK_LIB([ssl], [SSL_CIPHER_standard_name], [AC_DEFINE([HAVE_CIPHER_STD_NAME], 1, [HAVE_CIPHER_STD_NAME])])
 fi
+AM_CONDITIONAL([WITH_SSL], [test "x$with_openssl" = "xyes"])
+
+# Build with zlib
+AC_ARG_WITH([zlib],
+  [AS_HELP_STRING([--with-zlib], [Build with zlib support for reading gzipped logs. Default is disabled])],
+  [zlib="$withval"],
+  [zlib="no"])
+
+if test "$zlib" = 'yes'; then
+  AC_CHECK_LIB([z], [gzopen], [], [AC_MSG_ERROR([zlib library missing])])
+  AC_CHECK_HEADERS([zlib.h], [], [AC_MSG_ERROR([zlib header missing])])
+  AC_DEFINE([HAVE_ZLIB], 1, [Build with zlib support])
+fi
+AM_CONDITIONAL([WITH_ZLIB], [test "x$zlib" = "xyes"])
 
 # GeoIP
 AC_ARG_ENABLE([geoip],[AS_HELP_STRING([--enable-geoip],[Enable GeoIP country lookup. Supported types: mmdb, legacy. Default is disabled])],[geoip="$enableval"],[geoip=no])
@@ -181,7 +208,6 @@ AC_CHECK_LIB([nsl], [gethostbyname])
 AC_CHECK_LIB([socket], [socket])
 
 # Checks for header files.
-AC_HEADER_STDC
 AC_CHECK_HEADERS([arpa/inet.h])
 AC_CHECK_HEADERS([fcntl.h])
 AC_CHECK_HEADERS([inttypes.h])
@@ -243,6 +269,23 @@ AC_CHECK_FUNCS([strspn])
 AC_CHECK_FUNCS([strstr])
 AC_CHECK_FUNCS([strtol])
 AC_CHECK_FUNCS([strtoull])
+AC_CHECK_FUNCS([timegm])
+
+# Record the arguments given to configure so that --version reports the actual
+# build configuration instead of inferring it from feature test macros.
+# ac_safe_unquote (autoconf >= 2.72) drops the quoting autoconf adds around
+# arguments that do not need it, which is what `config.status --config` prints.
+# Older autoconf leaves it unset, so every argument stays quoted; it is applied
+# in a separate step because not every sed accepts an empty -e script.
+GO_CONFIGURE_ARGS=$ac_configure_args
+if test -n "$ac_safe_unquote"; then
+  GO_CONFIGURE_ARGS=`printf '%s\n' "$GO_CONFIGURE_ARGS" | sed "$ac_safe_unquote"`
+fi
+# Strip the leading space, then escape backslashes and double quotes so the
+# result is a valid C string literal.
+GO_CONFIGURE_ARGS=`printf '%s\n' "$GO_CONFIGURE_ARGS" | sed -e ['s/^ *//'] -e ['s/[\\\\"]/\\\\&/g']`
+AC_DEFINE_UNQUOTED([GO_CONFIGURE_ARGS], ["$GO_CONFIGURE_ARGS"],
+                   [Arguments given to configure at build time])
 
 AC_CONFIG_FILES([Makefile po/Makefile.in])
 AC_OUTPUT
@@ -258,9 +301,11 @@ Your build configuration:
   Linker flags   : $LIBS $LDFLAGS
   UTF-8 support  : $utf8
   Dynamic buffer : $with_getline
+  ASan           : $with_asan
   Geolocation    : $geolocation
   Storage method : $storage
   TLS/SSL        : $openssl
+  zlib support   : $zlib
   Bugs           : $PACKAGE_BUGREPORT
 
 EOF

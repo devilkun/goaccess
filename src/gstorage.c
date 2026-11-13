@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,17 +28,18 @@
  * SOFTWARE.
  */
 
-#include <stdio.h>
 #if !defined __SUNPRO_C
 #include <stdint.h>
 #endif
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "gstorage.h"
 
 #ifdef HAVE_GEOLOCATION
 #include "geoip1.h"
+#include "geolocation.h"
 #endif
 
 #include "browsers.h"
@@ -50,6 +51,96 @@
 #include "util.h"
 #include "xmalloc.h"
 
+#ifdef HAVE_GEOLOCATION
+typedef enum {
+  ASN_LOOKUP_NOT_RUN,
+  ASN_LOOKUP_NOT_FOUND,
+  ASN_LOOKUP_FOUND,
+} GASNLookupState;
+
+/* Record the continent the GeoIP database resolved a country to. */
+static void
+set_country_continent (const char *country, const char *continent) {
+  if (country == NULL || continent == NULL)
+    return;
+  ht_insert_country_continent (country, continent);
+}
+
+/* *INDENT-OFF* */
+/* ISO 3166-1 alpha-2 country codes grouped by continent. Used as a static
+ * fallback only when a country was restored from a database persisted
+ * before country-to-continent associations were stored; the persisted
+ * association always takes precedence since providers disagree on a few
+ * territories. Codes are space separated and space terminated so a "XX "
+ * pattern matches exactly one code. */
+static const struct {
+  const char *codes;
+  const char *continent;
+} continents_by_country[] = {
+  { "AO BF BI BJ BW CD CF CG CI CM CV DJ DZ EG EH ER ET GA GH GM GN GQ GW "
+    "KE KM LR LS LY MA MG ML MR MU MW MZ NA NE NG RE RW SC SD SH SL SN SO "
+    "SS ST SZ TD TG TN TZ UG YT ZA ZM ZW "                                    , "AF Africa"        } ,
+  { "AQ BV GS HM TF "                                                         , "AN Antarctica"    } ,
+  { "AE AF AM AZ BD BH BN BT CC CN GE HK ID IL IN IO IQ IR JO JP KG KH KP "
+    "KR KW KZ LA LB LK MM MN MO MV MY NP OM PH PK PS QA SA SG SY TH TJ TM "
+    "TR TW UZ VN YE "                                                         , "AS Asia"          } ,
+  { "AD AL AT AX BA BE BG BY CH CY CZ DE DK EE ES FI FO FR GB GG GI GR HR "
+    "HU IE IM IS IT JE LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS RU SE "
+    "SI SJ SK SM UA VA XK "                                                   , "EU Europe"        } ,
+  { "AG AI AW BB BL BM BQ BS BZ CA CR CU CW DM DO GD GL GP GT HN HT JM KN "
+    "KY LC MF MQ MS MX NI PA PM PR SV SX TC TT US VC VG VI "                  , "NA North America" } ,
+  { "AS AU CK CX FJ FM GU KI MH MP NC NF NR NU NZ PF PG PN PW SB TK TL TO "
+    "TV UM VU WF WS "                                                         , "OC Oceania"       } ,
+  { "AR BO BR CL CO EC FK GF GY PE PY SR UY VE "                             , "SA South America" } ,
+};
+/* *INDENT-ON* */
+
+/* Look up the continent for a "CODE Name" country label in the static
+ * country code table.
+ *
+ * On success, the continent code & name label is returned.
+ * If the country code is not found, NULL is returned. */
+static const char *
+get_static_continent (const char *country) {
+  char code[4] = { 0 };
+  size_t i;
+
+  if (!country[0] || !country[1] || country[2] != ' ')
+    return NULL;
+
+  code[0] = country[0];
+  code[1] = country[1];
+  code[2] = ' ';
+
+  for (i = 0; i < ARRAY_SIZE (continents_by_country); ++i) {
+    if (strstr (continents_by_country[i].codes, code))
+      return continents_by_country[i].continent;
+  }
+  return NULL;
+}
+
+/* Get the continent for the given country, preferring the association
+ * recorded during ingestion over the static table.
+ *
+ * On success, the continent code & name label is returned.
+ * On failure, NULL is returned. */
+const char *
+get_continent_for_country (const char *country) {
+  const char *continent = NULL;
+
+  if (country == NULL)
+    return NULL;
+
+  if ((continent = ht_get_country_continent (country)))
+    return continent;
+
+  /* databases persisted before the association was stored have nothing to
+   * restore; fall back to the static mapping */
+  return get_static_continent (country);
+}
+
+#endif
+
 /* private prototypes */
 /* key/data generators for each module */
 
@@ -57,7 +148,6 @@ static int gen_visitor_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_404_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_browser_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_host_key (GKeyData * kdata, GLogItem * logitem);
-static int gen_keyphrase_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_os_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_vhost_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_remote_user_key (GKeyData * kdata, GLogItem * logitem);
@@ -70,10 +160,12 @@ static int gen_status_code_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_visit_time_key (GKeyData * kdata, GLogItem * logitem);
 #ifdef HAVE_GEOLOCATION
 static int gen_geolocation_key (GKeyData * kdata, GLogItem * logitem);
+static int gen_asn_key (GKeyData * kdata, GLogItem * logitem);
 #endif
 /* UMS */
 static int gen_mime_type_key (GKeyData * kdata, GLogItem * logitem);
 static int gen_tls_type_key (GKeyData * kdata, GLogItem * logitem);
+static int gen_utm_campaign_key (GKeyData * kdata, GLogItem * logitem);
 
 /* insertion metric routines */
 static void insert_data (GModule module, GKeyData * kdata);
@@ -99,6 +191,8 @@ const httpmethods http_methods[] = {
   { "TRACE"            , 5  } ,
   { "CONNECT"          , 7  } ,
   { "PATCH"            , 5  } ,
+  { "SEARCH"           , 6  } ,
+  { "QUERY"            , 5  } ,
   /* WebDav */
   { "PROPFIND"         , 8  } ,
   { "PROPPATCH"        , 9  } ,
@@ -120,7 +214,7 @@ const httpmethods http_methods[] = {
   { "MKACTIVITY"       , 10 } ,
   { "ORDERPATCH"       , 10 } ,
 };
-size_t http_methods_len = ARRAY_SIZE (http_methods);
+const size_t http_methods_len = ARRAY_SIZE (http_methods);
 
 const httpprotocols http_protocols[] = {
   { "HTTP/1.0" , 8 } ,
@@ -128,9 +222,9 @@ const httpprotocols http_protocols[] = {
   { "HTTP/2"   , 6 } ,
   { "HTTP/3"   , 6 } ,
 };
-size_t http_protocols_len = ARRAY_SIZE (http_protocols);
+const size_t http_protocols_len = ARRAY_SIZE (http_protocols);
 
-static GParse paneling[] = {
+static const GParse paneling[] = {
   {
     VISITORS,
     gen_visitor_key,
@@ -144,6 +238,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    1, /* vkey_data */
   }, {
     REQUESTS,
     gen_request_key,
@@ -157,6 +252,7 @@ static GParse paneling[] = {
     insert_method,
     insert_protocol,
     NULL,
+    0, /* vkey_data */
   }, {
     REQUESTS_STATIC,
     gen_static_request_key,
@@ -170,6 +266,7 @@ static GParse paneling[] = {
     insert_method,
     insert_protocol,
     NULL,
+    0, /* vkey_data */
   }, {
     NOT_FOUND,
     gen_404_key,
@@ -183,6 +280,7 @@ static GParse paneling[] = {
     insert_method,
     insert_protocol,
     NULL,
+    0, /* vkey_data */
   }, {
     HOSTS,
     gen_host_key,
@@ -196,6 +294,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     insert_agent,
+    1, /* vkey_data */
   }, {
     OS,
     gen_os_key,
@@ -209,6 +308,7 @@ static GParse paneling[] = {
     insert_method,
     insert_protocol,
     NULL,
+    1, /* vkey_data */
   }, {
     BROWSERS,
     gen_browser_key,
@@ -222,6 +322,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    1, /* vkey_data */
   }, {
     REFERRERS,
     gen_referer_key,
@@ -235,6 +336,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
   }, {
     REFERRING_SITES,
     gen_ref_site_key,
@@ -248,19 +350,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
-  }, {
-    KEYPHRASES,
-    gen_keyphrase_key,
-    insert_data,
-    NULL,
-    insert_hit,
-    insert_visitor,
-    insert_bw,
-    insert_cumts,
-    insert_maxts,
-    NULL,
-    NULL,
-    NULL,
+    0, /* vkey_data */
   },
 #ifdef HAVE_GEOLOCATION
   {
@@ -276,6 +366,22 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    1, /* vkey_data */
+  },
+  {
+    ASN,
+    gen_asn_key,
+    insert_data,
+    NULL,
+    insert_hit,
+    insert_visitor,
+    insert_bw,
+    insert_cumts,
+    insert_maxts,
+    NULL,
+    NULL,
+    NULL,
+    1, /* vkey_data */
   },
 #endif
   {
@@ -291,6 +397,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
   }, {
     VISIT_TIMES,
     gen_visit_time_key,
@@ -304,6 +411,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
   }, {
     VIRTUAL_HOSTS,
     gen_vhost_key,
@@ -317,6 +425,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
   }, {
     REMOTE_USER,
     gen_remote_user_key,
@@ -330,6 +439,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
   }, {
     CACHE_STATUS,
     gen_cache_status_key,
@@ -343,6 +453,7 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
   }, {
     MIME_TYPE,
     gen_mime_type_key,
@@ -356,6 +467,7 @@ static GParse paneling[] = {
     NULL, /*method*/
     NULL, /*protocol*/
     NULL, /*agent*/
+    0, /* vkey_data */
   }, {
     TLS_TYPE,
     gen_tls_type_key,
@@ -369,21 +481,36 @@ static GParse paneling[] = {
     NULL,
     NULL,
     NULL,
+    0, /* vkey_data */
+  }, {
+    UTM_CAMPAIGNS,
+    gen_utm_campaign_key,
+    insert_data,
+    NULL,
+    insert_hit,
+    insert_visitor,
+    insert_bw,
+    insert_cumts,
+    insert_maxts,
+    NULL,
+    NULL,
+    NULL,
+    0, /* vkey_data */
   },
 };
 /* *INDENT-ON* */
 
 /* Initialize a new GKeyData instance */
 static void
-new_modulekey (GKeyData * kdata) {
+new_modulekey (GKeyData *kdata) {
   GKeyData key = {
+    .data_buffer = NULL,
     .data = NULL,
     .data_nkey = 0,
     .root = NULL,
     .dhash = 0,
     .rhash = 0,
     .root_nkey = 0,
-    .uniq_key = NULL,
     .uniq_nkey = 0,
   };
   *kdata = key;
@@ -393,7 +520,7 @@ new_modulekey (GKeyData * kdata) {
  *
  * On error, or if not found, NULL is returned.
  * On success, the panel value is returned. */
-static GParse *
+static const GParse *
 panel_lookup (GModule module) {
   int i, num_panels = ARRAY_SIZE (paneling);
 
@@ -402,6 +529,30 @@ panel_lookup (GModule module) {
       return &paneling[i];
   }
   return NULL;
+}
+
+/* Determine whether a panel's data key derives solely from the visitor key
+ * under the current configuration. With an hour/minute date specificity the
+ * VISITORS data key carries time of day, which the visitor key does not.
+ *
+ * If the panel counts visitors off the visitor key, non-zero is returned.
+ * Otherwise, 0 is returned. */
+static int
+is_vkey_data (const GParse *parse) {
+  if (parse->module == VISITORS && conf.date_spec_hr)
+    return 0;
+  return parse->vkey_data;
+}
+
+/* Determine whether a module's data key derives solely from the visitor key
+ * and therefore holds no uniqmap entries.
+ *
+ * If the module counts visitors off the visitor key, non-zero is returned.
+ * Otherwise, 0 is returned. */
+int
+module_vkey_data (GModule module) {
+  const GParse *parse = panel_lookup (module);
+  return parse ? is_vkey_data (parse) : 0;
 }
 
 /* Allocate memory for a new GMetrics instance.
@@ -416,7 +567,7 @@ new_gmetrics (void) {
 
 /* Free memory of a GMetrics object */
 void
-free_gmetrics (GMetrics * metric) {
+free_gmetrics (GMetrics *metric) {
   if (metric == NULL)
     return;
 
@@ -430,14 +581,15 @@ free_gmetrics (GMetrics * metric) {
  *
  * On error, NULL is returned.
  * On success, the string module value is returned. */
-char *
+const char *
 get_mtr_str (GSMetric metric) {
   /* String modules to enumerated modules */
-  GEnum enum_metrics[] = {
+  static const GEnum enum_metrics[] = {
     {"MTRC_KEYMAP", MTRC_KEYMAP},
     {"MTRC_ROOTMAP", MTRC_ROOTMAP},
     {"MTRC_DATAMAP", MTRC_DATAMAP},
     {"MTRC_UNIQMAP", MTRC_UNIQMAP},
+    {"MTRC_METRICS", MTRC_METRICS},
     {"MTRC_ROOT", MTRC_ROOT},
     {"MTRC_HITS", MTRC_HITS},
     {"MTRC_VISITORS", MTRC_VISITORS},
@@ -481,23 +633,23 @@ uint642ptr (uint64_t val) {
 
 /* Set the module totals to calculate percentages. */
 void
-set_module_totals (GPercTotals * totals) {
+set_module_totals (GPercTotals *totals) {
   totals->bw = ht_sum_bw ();
   totals->hits = ht_sum_valid ();
-  totals->visitors = ht_get_size_uniqmap (VISITORS);
+  totals->visitors = ht_sum_uniq_visitors ();
 }
 
 /* Set numeric metrics for each request given raw data.
  *
  * On success, numeric metrics are set into the given structure. */
 void
-set_data_metrics (GMetrics * ometrics, GMetrics ** nmetrics, GPercTotals totals) {
+set_data_metrics (GMetrics *ometrics, GMetrics **nmetrics, GPercTotals totals) {
   GMetrics *metrics;
 
   /* determine percentages for certain fields */
   float hits_perc = get_percentage (totals.hits, ometrics->hits);
   float visitors_perc = get_percentage (totals.visitors, ometrics->visitors);
-  float bw_perc = get_percentage (totals.bw, ometrics->bw.nbw);
+  float bw_perc = get_percentage (totals.bw, ometrics->nbw);
 
   metrics = new_gmetrics ();
 
@@ -512,7 +664,7 @@ set_data_metrics (GMetrics * ometrics, GMetrics ** nmetrics, GPercTotals totals)
   metrics->visitors_perc = visitors_perc < 0 ? 0 : visitors_perc;
 
   /* bandwidth field */
-  metrics->bw.nbw = ometrics->bw.nbw;
+  metrics->nbw = ometrics->nbw;
 
   /* time served fields */
   if (conf.serve_usecs && ometrics->hits > 0) {
@@ -543,16 +695,25 @@ count_bw (int numdate, uint64_t resp_size) {
 
 /* Keep track of all invalid log strings. */
 static void
-count_invalid (GLog * glog, const char *line) {
-  glog->invalid++;
+count_invalid (GLog *glog, GLogItem *logitem, const char *line) {
+  uint8_t idx = 0;
+  atomic_fetch_add (&glog->invalid, 1);
   ht_inc_cnt_overall ("failed_requests", 1);
 
   if (conf.invalid_requests_log) {
     LOG_INVALID (("%s", line));
   }
 
-  if (glog->items->errstr && glog->invalid < MAX_LOG_ERRORS) {
-    glog->errors[glog->log_erridx++] = xstrdup (glog->items->errstr);
+  if (logitem->errstr) {
+    pthread_mutex_lock (&glog->error_mutex);
+
+    idx = atomic_load (&glog->log_erridx);
+    if (idx < MAX_LOG_ERRORS) {
+      glog->errors[idx] = xstrdup (logitem->errstr);
+      atomic_store (&glog->log_erridx, idx + 1);
+    }
+
+    pthread_mutex_unlock (&glog->error_mutex);
   }
 }
 
@@ -562,11 +723,10 @@ count_invalid (GLog * glog, const char *line) {
  * tests ran.
 */
 void
-uncount_invalid (GLog * glog) {
-  if (glog->invalid > conf.num_tests)
-    glog->invalid -= conf.num_tests;
-  else
-    glog->invalid = 0;
+uncount_invalid (GLog *glog) {
+  uint64_t current = atomic_load (&glog->invalid);
+  uint64_t new_val = (current > conf.num_tests) ? (current - conf.num_tests) : 0;
+  atomic_store (&glog->invalid, new_val);
 }
 
 /* Count down the number of processed hits.
@@ -575,7 +735,7 @@ uncount_invalid (GLog * glog) {
  * tests ran.
 */
 void
-uncount_processed (GLog * glog) {
+uncount_processed (GLog *glog) {
   lock_spinner ();
   if (glog->processed > conf.num_tests)
     glog->processed -= conf.num_tests;
@@ -594,7 +754,7 @@ count_valid (int numdate) {
 
 /* Keep track of all valid and processed log strings. */
 void
-count_process (GLog * glog) {
+count_process (GLog *glog) {
   lock_spinner ();
   glog->processed++;
   ht_inc_cnt_overall ("total_requests", 1);
@@ -602,23 +762,103 @@ count_process (GLog * glog) {
 }
 
 void
-count_process_and_invalid (GLog * glog, const char *line) {
+count_process_and_invalid (GLog *glog, GLogItem *logitem, const char *line) {
   count_process (glog);
-  count_invalid (glog, line);
+  count_invalid (glog, logitem, line);
 }
+
+/* Increment an exclusion counter while serializing storage access. */
+static void
+count_excluded (const char *key) {
+  lock_spinner ();
+  ht_inc_cnt_overall (key, 1);
+  unlock_spinner ();
+}
+
+#ifdef HAVE_GEOLOCATION
+/* Resolve and cache the ASN metadata for a parsed log item.
+ *
+ * On success, the cached ASN is available and 0 is returned.
+ * On failure, the failed lookup is cached and 1 is returned. */
+static int
+resolve_asn (GLogItem *logitem) {
+  char asn[ASN_LEN] = "";
+  int status = 0;
+
+  if (logitem->asn_resolved != ASN_LOOKUP_NOT_RUN)
+    return logitem->asn_resolved != ASN_LOOKUP_FOUND;
+
+  status = geoip_get_asn (logitem->host, &logitem->asn_number, asn);
+  logitem->asn_resolved = status == 0 ? ASN_LOOKUP_FOUND : ASN_LOOKUP_NOT_FOUND;
+  if (asn[0] != '\0')
+    logitem->asn = xstrdup (asn);
+
+  return status;
+}
+#endif
 
 /* Keep track of all excluded log strings (IPs).
  *
  * If IP not range, 1 is returned.
  * If IP is excluded, 0 is returned. */
 int
-excluded_ip (GLogItem * logitem) {
+excluded_ip (GLogItem *logitem) {
   if (conf.ignore_ip_idx && ip_in_range (logitem->host)) {
-    ht_inc_cnt_overall ("excluded_ip", 1);
+    count_excluded ("excluded_ip");
     return 0;
   }
   return 1;
 }
+
+#ifdef HAVE_LIBMAXMINDDB
+/* Check whether an ASN appears in a sorted ASN list.
+ *
+ * If the ASN is present, 1 is returned.
+ * If the ASN is absent, 0 is returned. */
+static int
+asn_in_list (uint32_t asn, const uint32_t *list, int len) {
+  int high = len, low = 0, mid = 0;
+
+  while (low < high) {
+    mid = low + (high - low) / 2;
+    if (list[mid] < asn)
+      low = mid + 1;
+    else
+      high = mid;
+  }
+
+  return low < len && list[low] == asn;
+}
+
+/* Determine whether a request should be kept based on its resolved ASN.
+ *
+ * With --include-asn, only requests from a listed ASN are kept; requests
+ * without a resolvable ASN are dropped. --exclude-asn is applied after that.
+ *
+ * If the request should be kept, 1 is returned.
+ * If the request is excluded, 0 is returned. */
+int
+excluded_asn (GLogItem *logitem) {
+  int keep = 1;
+
+  if (!conf.exclude_asn_idx && !conf.include_asn_idx)
+    return 1;
+
+  if (resolve_asn (logitem))
+    keep = !conf.include_asn_idx;
+  else if (conf.include_asn_idx &&
+           !asn_in_list (logitem->asn_number, conf.include_asns, conf.include_asn_idx))
+    keep = 0;
+  else if (asn_in_list (logitem->asn_number, conf.exclude_asns, conf.exclude_asn_idx))
+    keep = 0;
+
+  if (keep)
+    return 1;
+
+  count_excluded ("excluded_asn");
+  return 0;
+}
+#endif
 
 /* A wrapper function to insert a data keymap string key.
  *
@@ -626,7 +866,7 @@ excluded_ip (GLogItem * logitem) {
  * On error, 0 is returned.
  * On success the value of the key inserted is returned */
 static int
-insert_dkeymap (GModule module, GKeyData * kdata) {
+insert_dkeymap (GModule module, GKeyData *kdata) {
   return ht_insert_keymap (module, kdata->numdate, kdata->dhash, &kdata->cdnkey);
 }
 
@@ -636,13 +876,13 @@ insert_dkeymap (GModule module, GKeyData * kdata) {
  * On error, 0 is returned.
  * On success the value of the key inserted is returned */
 static int
-insert_rkeymap (GModule module, GKeyData * kdata) {
+insert_rkeymap (GModule module, GKeyData *kdata) {
   return ht_insert_keymap (module, kdata->numdate, kdata->rhash, &kdata->crnkey);
 }
 
 /* A wrapper function to insert a datamap uint32_t key and string value. */
 static void
-insert_data (GModule module, GKeyData * kdata) {
+insert_data (GModule module, GKeyData *kdata) {
   ht_insert_datamap (module, kdata->numdate, kdata->data_nkey, kdata->data, kdata->cdnkey);
 }
 
@@ -652,28 +892,28 @@ insert_data (GModule module, GKeyData * kdata) {
  * On error, 0 is returned.
  * On success the value of the key inserted is returned */
 static int
-insert_uniqmap (GModule module, GKeyData * kdata, uint32_t uniq_nkey) {
+insert_uniqmap (GModule module, GKeyData *kdata, uint32_t uniq_nkey) {
   return ht_insert_uniqmap (module, kdata->numdate, kdata->data_nkey, uniq_nkey);
 }
 
 /* A wrapper function to insert a rootmap uint32_t key from the keymap
  * store mapped to its string value. */
 static void
-insert_rootmap (GModule module, GKeyData * kdata) {
+insert_rootmap (GModule module, GKeyData *kdata) {
   ht_insert_rootmap (module, kdata->numdate, kdata->root_nkey, kdata->root, kdata->crnkey);
 }
 
 /* A wrapper function to insert a data uint32_t key mapped to the
  * corresponding uint32_t root key. */
 static void
-insert_root (GModule module, GKeyData * kdata) {
+insert_root (GModule module, GKeyData *kdata) {
   ht_insert_root (module, kdata->numdate, kdata->data_nkey, kdata->root_nkey, kdata->cdnkey,
                   kdata->crnkey);
 }
 
 /* A wrapper function to increase hits counter from an uint32_t key. */
 static void
-insert_hit (GModule module, GKeyData * kdata) {
+insert_hit (GModule module, GKeyData *kdata) {
   ht_insert_hits (module, kdata->numdate, kdata->data_nkey, 1, kdata->cdnkey);
   ht_insert_meta_data (module, kdata->numdate, "hits", 1);
 }
@@ -681,7 +921,7 @@ insert_hit (GModule module, GKeyData * kdata) {
 /* A wrapper function to increase visitors counter from an uint32_t
  * key. */
 static void
-insert_visitor (GModule module, GKeyData * kdata) {
+insert_visitor (GModule module, GKeyData *kdata) {
   ht_insert_visitor (module, kdata->numdate, kdata->data_nkey, 1, kdata->cdnkey);
   ht_insert_meta_data (module, kdata->numdate, "visitors", 1);
 }
@@ -689,7 +929,7 @@ insert_visitor (GModule module, GKeyData * kdata) {
 /* A wrapper function to increases bandwidth counter from an uint32_t
  * key. */
 static void
-insert_bw (GModule module, GKeyData * kdata, uint64_t size) {
+insert_bw (GModule module, GKeyData *kdata, uint64_t size) {
   ht_insert_bw (module, kdata->numdate, kdata->data_nkey, size, kdata->cdnkey);
   ht_insert_meta_data (module, kdata->numdate, "bytes", size);
 }
@@ -697,7 +937,7 @@ insert_bw (GModule module, GKeyData * kdata, uint64_t size) {
 /* A wrapper call to increases cumulative time served counter
  * from an uint32_t key. */
 static void
-insert_cumts (GModule module, GKeyData * kdata, uint64_t ts) {
+insert_cumts (GModule module, GKeyData *kdata, uint64_t ts) {
   ht_insert_cumts (module, kdata->numdate, kdata->data_nkey, ts, kdata->cdnkey);
   ht_insert_meta_data (module, kdata->numdate, "cumts", ts);
 }
@@ -705,29 +945,27 @@ insert_cumts (GModule module, GKeyData * kdata, uint64_t ts) {
 /* A wrapper call to insert the maximum time served counter from
  * an uint32_t key. */
 static void
-insert_maxts (GModule module, GKeyData * kdata, uint64_t ts) {
+insert_maxts (GModule module, GKeyData *kdata, uint64_t ts) {
   ht_insert_maxts (module, kdata->numdate, kdata->data_nkey, ts, kdata->cdnkey);
   ht_insert_meta_data (module, kdata->numdate, "maxts", ts);
 }
 
 static void
-insert_method (GModule module, GKeyData * kdata, const char *data) {
-  ht_insert_method (module, kdata->numdate, kdata->data_nkey, data ? data : "---",
-                    kdata->cdnkey);
+insert_method (GModule module, GKeyData *kdata, const char *data) {
+  ht_insert_method (module, kdata->numdate, kdata->data_nkey, data ? data : "---", kdata->cdnkey);
 }
 
 /* A wrapper call to insert a method given an uint32_t key and string
  * value. */
 static void
-insert_protocol (GModule module, GKeyData * kdata, const char *data) {
-  ht_insert_protocol (module, kdata->numdate, kdata->data_nkey, data ? data : "---",
-                      kdata->cdnkey);
+insert_protocol (GModule module, GKeyData *kdata, const char *data) {
+  ht_insert_protocol (module, kdata->numdate, kdata->data_nkey, data ? data : "---", kdata->cdnkey);
 }
 
 /* A wrapper call to insert an agent for a hostname given an uint32_t
  * key and uint32_t value.  */
 static void
-insert_agent (GModule module, GKeyData * kdata, uint32_t agent_nkey) {
+insert_agent (GModule module, GKeyData *kdata, uint32_t agent_nkey) {
   ht_insert_agent (module, kdata->numdate, kdata->data_nkey, agent_nkey);
 }
 
@@ -739,7 +977,7 @@ insert_agent (GModule module, GKeyData * kdata, uint32_t agent_nkey) {
  *
  * On success the new unique request key is returned */
 static char *
-gen_unique_req_key (GLogItem * logitem) {
+gen_unique_req_key (GLogItem *logitem) {
   char *key = NULL;
   size_t s1 = 0, s2 = 0, s3 = 0, nul = 1, sep = 0;
 
@@ -806,34 +1044,39 @@ append_query_string (char **req, const char *qstr) {
 /* A wrapper to assign the given data key and the data item to the key
  * data structure */
 static void
-get_kdata (GKeyData * kdata, const char *data_key, const char *data) {
+get_kdata (GKeyData *kdata, const char *data_key, const char *data) {
   /* inserted in datamap */
   kdata->data = data;
   /* inserted in keymap */
-  kdata->dhash = djb2 ((unsigned char *) data_key);
+  kdata->dhash = djb2 ((const unsigned char *) data_key);
 }
 
 /* A wrapper to assign the given data key and the data item to the key
  * data structure */
 static void
-get_kroot (GKeyData * kdata, const char *root_key, const char *root) {
+get_kroot (GKeyData *kdata, const char *root_key, const char *root) {
   /* inserted in datamap */
   kdata->root = root;
   /* inserted in keymap */
-  kdata->rhash = djb2 ((unsigned char *) root_key);
+  kdata->rhash = djb2 ((const unsigned char *) root_key);
 }
 
 /* Generate a visitor's key given the date specificity. For instance,
- * if the specificity if set to hours, then a generated key would
+ * if the specificity is set to hours, then a generated key would
  * look like: 03/Jan/2016:09 */
 static void
 set_spec_visitor_key (char **fdate, const char *ftime) {
-  size_t dlen = 0, tlen = 0;
+  size_t dlen = 0, tlen = 0, idx = 0;
   char *key = NULL, *tkey = NULL, *pch = NULL;
 
   tkey = xstrdup (ftime);
-  if (conf.date_spec_hr && (pch = strchr (tkey, ':')) && (pch - tkey) > 0)
+  if (conf.date_spec_hr == 1 && (pch = strchr (tkey, ':')) && (pch - tkey) > 0)
     *pch = '\0';
+  else if (conf.date_spec_hr == 2 && (pch = strrchr (tkey, ':')) && (pch - tkey) > 0) {
+    *pch = '\0';
+    if ((pch = strchr (tkey, ':')) && (idx = pch - tkey))
+      memmove (&tkey[idx], &tkey[idx + 1], strlen (tkey) - idx);
+  }
 
   dlen = strlen (*fdate);
   tlen = strlen (tkey);
@@ -854,7 +1097,7 @@ set_spec_visitor_key (char **fdate, const char *ftime) {
  * On success, the date key is assigned to our key data structure.
  */
 static int
-gen_visitor_key (GKeyData * kdata, GLogItem * logitem) {
+gen_visitor_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->date || !logitem->time)
     return 1;
 
@@ -875,11 +1118,11 @@ gen_visitor_key (GKeyData * kdata, GLogItem * logitem) {
  * structure.
  */
 static int
-gen_req_key (GKeyData * kdata, GLogItem * logitem) {
+gen_req_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->req)
     return 1;
 
-  if (logitem->qstr)
+  if (logitem->qstr && !conf.ignore_qstr)
     append_query_string (&logitem->req, logitem->qstr);
   logitem->req_key = gen_unique_req_key (logitem);
 
@@ -896,7 +1139,7 @@ gen_req_key (GKeyData * kdata, GLogItem * logitem) {
  * structure.
  */
 static int
-gen_request_key (GKeyData * kdata, GLogItem * logitem) {
+gen_request_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->req || logitem->is_404 || logitem->is_static)
     return 1;
 
@@ -909,7 +1152,7 @@ gen_request_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated request key is assigned to our key data
  * structure. */
 static int
-gen_404_key (GKeyData * kdata, GLogItem * logitem) {
+gen_404_key (GKeyData *kdata, GLogItem *logitem) {
   if (logitem->req && logitem->is_404)
     return gen_req_key (kdata, logitem);
   return 1;
@@ -921,7 +1164,7 @@ gen_404_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated request key is assigned to our key data
  * structure. */
 static int
-gen_static_request_key (GKeyData * kdata, GLogItem * logitem) {
+gen_static_request_key (GKeyData *kdata, GLogItem *logitem) {
   if (logitem->req && logitem->is_static)
     return gen_req_key (kdata, logitem);
   return 1;
@@ -933,7 +1176,7 @@ gen_static_request_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated vhost key is assigned to our key data
  * structure. */
 static int
-gen_vhost_key (GKeyData * kdata, GLogItem * logitem) {
+gen_vhost_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->vhost)
     return 1;
 
@@ -949,7 +1192,7 @@ gen_vhost_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated userid key is assigned to our key data
  * structure. */
 static int
-gen_remote_user_key (GKeyData * kdata, GLogItem * logitem) {
+gen_remote_user_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->userid)
     return 1;
 
@@ -965,7 +1208,7 @@ gen_remote_user_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated cache status key is assigned to our key data
  * structure. */
 static int
-gen_cache_status_key (GKeyData * kdata, GLogItem * logitem) {
+gen_cache_status_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->cache_status)
     return 1;
 
@@ -981,14 +1224,41 @@ gen_cache_status_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated host key is assigned to our key data
  * structure. */
 static int
-gen_host_key (GKeyData * kdata, GLogItem * logitem) {
+gen_host_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->host)
     return 1;
 
-  get_kdata (kdata, logitem->host, logitem->host);
+  if (conf.anonymize_ip) {
+    anonymize_host (logitem->host, kdata->data_buffer);
+    get_kdata (kdata, kdata->data_buffer, kdata->data_buffer);
+  } else {
+    get_kdata (kdata, logitem->host, logitem->host);
+  }
   kdata->numdate = logitem->numdate;
 
   return 0;
+}
+
+/* Add browsers/OSs our logitem structure and reuse crawlers if applicable. */
+void
+set_browser_os (GLogItem *logitem) {
+  char *a1 = xstrdup (logitem->agent), *a2 = xstrdup (logitem->agent);
+  char browser_type[BROWSER_TYPE_LEN] = "";
+  char os_type[OPESYS_TYPE_LEN] = "";
+
+  logitem->browser = verify_browser (a1, browser_type);
+  logitem->browser_type = xstrdup (browser_type);
+
+  if (is_crawler_type (logitem->browser_type) || !strcmp (logitem->browser_type, "Others")) {
+    logitem->os = xstrdup (logitem->browser);
+    logitem->os_type = xstrdup (browser_type);
+  } else {
+    logitem->os = verify_os (a2, os_type);
+    logitem->os_type = xstrdup (os_type);
+  }
+
+  free (a1);
+  free (a2);
 }
 
 /* Generate a browser unique key for the browser's panel given a user
@@ -998,16 +1268,11 @@ gen_host_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated browser key is assigned to our key data
  * structure. */
 static int
-gen_browser_key (GKeyData * kdata, GLogItem * logitem) {
-  char *agent = NULL;
-  char browser_type[BROWSER_TYPE_LEN] = "";
-
+gen_browser_key (GKeyData *kdata, GLogItem *logitem) {
   if (logitem->agent == NULL || *logitem->agent == '\0')
     return 1;
-
-  agent = xstrdup (logitem->agent);
-  logitem->browser = verify_browser (agent, browser_type);
-  logitem->browser_type = xstrdup (browser_type);
+  if (logitem->browser == NULL || *logitem->browser == '\0')
+    return 1;
 
   /* e.g., Firefox 11.12 */
   get_kdata (kdata, logitem->browser, logitem->browser);
@@ -1015,8 +1280,6 @@ gen_browser_key (GKeyData * kdata, GLogItem * logitem) {
   /* Firefox */
   get_kroot (kdata, logitem->browser_type, logitem->browser_type);
   kdata->numdate = logitem->numdate;
-
-  free (agent);
 
   return 0;
 }
@@ -1028,16 +1291,11 @@ gen_browser_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated OS key is assigned to our key data
  * structure. */
 static int
-gen_os_key (GKeyData * kdata, GLogItem * logitem) {
-  char *agent = NULL;
-  char os_type[OPESYS_TYPE_LEN] = "";
-
+gen_os_key (GKeyData *kdata, GLogItem *logitem) {
   if (logitem->agent == NULL || *logitem->agent == '\0')
     return 1;
-
-  agent = xstrdup (logitem->agent);
-  logitem->os = verify_os (agent, os_type);
-  logitem->os_type = xstrdup (os_type);
+  if (logitem->os == NULL || *logitem->os == '\0')
+    return 1;
 
   /* e.g., GNU+Linux,Ubuntu 10.12 */
   get_kdata (kdata, logitem->os, logitem->os);
@@ -1045,8 +1303,6 @@ gen_os_key (GKeyData * kdata, GLogItem * logitem) {
   /* GNU+Linux */
   get_kroot (kdata, logitem->os_type, logitem->os_type);
   kdata->numdate = logitem->numdate;
-
-  free (agent);
 
   return 0;
 }
@@ -1084,7 +1340,7 @@ extract_mimemajor (const char *token) {
  * On success, the generated key is assigned to our key data structure.
  */
 static int
-gen_mime_type_key (GKeyData * kdata, GLogItem * logitem) {
+gen_mime_type_key (GKeyData *kdata, GLogItem *logitem) {
   const char *major = NULL;
 
   if (!logitem->mime_type)
@@ -1125,15 +1381,35 @@ extract_tlsmajor (const char *token) {
   return NULL;
 }
 
-/* UMS: generate a TLS settings unique key
+/* Join two TLS hierarchy components into an allocated path.
  *
- * On error, 1 is returned.
- * On success, the generated key is assigned to our key data structure.
- */
+ * On success, the allocated path is returned.
+ * On failure, NULL is returned. */
+static char *
+join_tls_components (const char *parent, const char *child) {
+  char *path = NULL;
+  size_t child_len = 0, parent_len = 0;
+
+  if (!parent || !child)
+    return NULL;
+
+  child_len = strlen (child);
+  parent_len = strlen (parent);
+  path = xmalloc (parent_len + child_len + 2);
+  memcpy (path, parent, parent_len);
+  path[parent_len] = TLS_HIERARCHY_SEPARATOR;
+  memcpy (path + parent_len + 1, child, child_len + 1);
+
+  return path;
+}
+
+/* Generate a TLS settings hierarchy key.
+ *
+ * On success, the generated key is assigned and 0 is returned.
+ * On failure, 1 is returned. */
 static int
-gen_tls_type_key (GKeyData * kdata, GLogItem * logitem) {
-  const char *tls;
-  size_t tlen = 0, clen = 0;
+gen_tls_type_key (GKeyData *kdata, GLogItem *logitem) {
+  const char *cipher = NULL, *tls = NULL;
 
   if (!logitem->tls_type)
     return 1;
@@ -1145,20 +1421,22 @@ gen_tls_type_key (GKeyData * kdata, GLogItem * logitem) {
     return 1;
 
   kdata->numdate = logitem->numdate;
-  if (!logitem->tls_cypher) {
+  if (!logitem->tls_cypher && !logitem->tls_group) {
     get_kroot (kdata, tls, tls);
     get_kdata (kdata, tls, tls);
     return 0;
   }
 
-  clen = strlen (logitem->tls_cypher);
-  tlen = strlen (tls);
+  cipher = logitem->tls_cypher ? logitem->tls_cypher : "";
+  logitem->tls_type_cypher = join_tls_components (tls, cipher);
 
-  logitem->tls_type_cypher = xmalloc (tlen + clen + 2);
-  memcpy (logitem->tls_type_cypher, tls, tlen);
-  logitem->tls_type_cypher[tlen] = '/';
-  /* includes terminating null */
-  memcpy (logitem->tls_type_cypher + tlen + 1, logitem->tls_cypher, clen + 1);
+  if (logitem->tls_group) {
+    logitem->tls_type_cypher_group =
+      join_tls_components (logitem->tls_type_cypher, logitem->tls_group);
+    get_kdata (kdata, logitem->tls_type_cypher_group, logitem->tls_type_cypher_group);
+    get_kroot (kdata, logitem->tls_type_cypher, logitem->tls_type_cypher);
+    return 0;
+  }
 
   get_kdata (kdata, logitem->tls_type_cypher, logitem->tls_type_cypher);
   get_kroot (kdata, tls, tls);
@@ -1173,7 +1451,7 @@ gen_tls_type_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated referrer key is assigned to our key data
  * structure. */
 static int
-gen_referer_key (GKeyData * kdata, GLogItem * logitem) {
+gen_referer_key (GKeyData *kdata, GLogItem *logitem) {
   if (!logitem->ref)
     return 1;
 
@@ -1189,7 +1467,7 @@ gen_referer_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated referring site key is assigned to our key data
  * structure. */
 static int
-gen_ref_site_key (GKeyData * kdata, GLogItem * logitem) {
+gen_ref_site_key (GKeyData *kdata, GLogItem *logitem) {
   if (logitem->site[0] == '\0')
     return 1;
 
@@ -1199,35 +1477,19 @@ gen_ref_site_key (GKeyData * kdata, GLogItem * logitem) {
   return 0;
 }
 
-/* A wrapper to generate a unique key for the keyphrases panel.
- *
- * On error, 1 is returned.
- * On success, the generated keyphrase key is assigned to our key data
- * structure. */
-static int
-gen_keyphrase_key (GKeyData * kdata, GLogItem * logitem) {
-  if (!logitem->keyphrase)
-    return 1;
-
-  get_kdata (kdata, logitem->keyphrase, logitem->keyphrase);
-  kdata->numdate = logitem->numdate;
-
-  return 0;
-}
-
 #ifdef HAVE_GEOLOCATION
 /* Extract geolocation for the given host.
  *
  * On error, 1 is returned.
- * On success, the extracted continent and country are set and 0 is
+ * On success, the extracted continent, country, and city are set and 0 is
  * returned. */
 static int
-extract_geolocation (GLogItem * logitem, char *continent, char *country) {
+extract_geolocation (GLogItem *logitem, char *continent, char *country, char *city) {
   if (!is_geoip_resource ())
     return 1;
 
-  geoip_get_country (logitem->host, country, logitem->type_ip);
-  geoip_get_continent (logitem->host, continent, logitem->type_ip);
+  /* NULL asn: the ASN panel performs its own lookup */
+  set_geolocation (logitem->host, continent, country, city, NULL);
 
   return 0;
 }
@@ -1240,11 +1502,15 @@ extract_geolocation (GLogItem * logitem, char *continent, char *country) {
  * data structure. */
 #ifdef HAVE_GEOLOCATION
 static int
-gen_geolocation_key (GKeyData * kdata, GLogItem * logitem) {
+gen_geolocation_key (GKeyData *kdata, GLogItem *logitem) {
   char continent[CONTINENT_LEN] = "";
   char country[COUNTRY_LEN] = "";
+  char city[CITY_LEN] = "";
 
-  if (extract_geolocation (logitem, continent, country) == 1)
+  if (extract_geolocation (logitem, continent, country, city) == 1)
+    return 1;
+
+  if (country[0] == '\0' && city[0] == '\0')
     return 1;
 
   if (country[0] != '\0')
@@ -1253,8 +1519,44 @@ gen_geolocation_key (GKeyData * kdata, GLogItem * logitem) {
   if (continent[0] != '\0')
     logitem->continent = xstrdup (continent);
 
-  get_kdata (kdata, logitem->country, logitem->country);
-  get_kroot (kdata, logitem->continent, logitem->continent);
+  if (city[0] != '\0')
+    logitem->city = xstrdup (city);
+
+  /* Record the country-to-continent mapping for holder construction */
+  if (logitem->country && logitem->continent)
+    set_country_continent (logitem->country, logitem->continent);
+
+  /* City identities retain their country so shared labels cannot move traffic
+   * between parents. The identity also records the hierarchy for restoration. */
+  if (conf.has_geocity && logitem->city && logitem->country) {
+    geo_city_key (kdata->data_buffer, logitem->country, logitem->city);
+    get_kdata (kdata, kdata->data_buffer, kdata->data_buffer);
+    get_kroot (kdata, logitem->country, logitem->country);
+  } else if (logitem->country) {
+    get_kdata (kdata, logitem->country, logitem->country);
+    if (logitem->continent)
+      get_kroot (kdata, logitem->continent, logitem->continent);
+  } else {
+    return 1;
+  }
+  kdata->numdate = logitem->numdate;
+
+  return 0;
+}
+
+/* A wrapper to generate a unique key for the ASN panel.
+ *
+ * On error, 1 is returned.
+ * On success, the generated ASN key is assigned to our key data structure. */
+static int
+gen_asn_key (GKeyData *kdata, GLogItem *logitem) {
+  if (!is_geoip_resource ())
+    return 1;
+
+  if (resolve_asn (logitem) || !logitem->asn)
+    return 1;
+
+  get_kdata (kdata, logitem->asn, logitem->asn);
   kdata->numdate = logitem->numdate;
 
   return 0;
@@ -1267,14 +1569,14 @@ gen_geolocation_key (GKeyData * kdata, GLogItem * logitem) {
  * On success, the generated status code key is assigned to our key
  * data structure. */
 static int
-gen_status_code_key (GKeyData * kdata, GLogItem * logitem) {
+gen_status_code_key (GKeyData *kdata, GLogItem *logitem) {
   const char *status = NULL, *type = NULL;
 
-  if (!logitem->status)
+  if (logitem->status == -1)
     return 1;
 
-  type = verify_status_code_type (logitem->status);
   status = verify_status_code (logitem->status);
+  type = verify_status_code_type (logitem->status);
 
   get_kdata (kdata, status, status);
   get_kroot (kdata, type, type);
@@ -1307,38 +1609,33 @@ parse_time_specificity_string (char *hmark, char *ftime) {
  * On success, the generated time key is assigned to our key data
  * structure. */
 static int
-gen_visit_time_key (GKeyData * kdata, GLogItem * logitem) {
+gen_visit_time_key (GKeyData *kdata, GLogItem *logitem) {
   char *hmark = NULL;
-  char hour[HRMI_LEN] = "";     /* %H:%M */
   if (!logitem->time)
     return 1;
 
-  /* if not a timestamp, then it must be a string containing the hour.
-   * this is faster than actual date conversion */
-  if (!has_timestamp (conf.time_format) && (hmark = strchr (logitem->time, ':'))) {
+  /* it must be a string containing the hour. */
+  if ((hmark = strchr (logitem->time, ':')))
     parse_time_specificity_string (hmark, logitem->time);
 
-    kdata->numdate = logitem->numdate;
-    get_kdata (kdata, logitem->time, logitem->time);
-    return 0;
-  }
-
-  /* otherwise it attempts to convert the date given a time format,
-   * though this is slower */
-  memset (hour, 0, sizeof *hour);
-  if (convert_date (hour, logitem->time, "%T", "%H:%M", HRMI_LEN) != 0)
-    return 1;
-
-  if (*hour == '\0')
-    return 1;
-
-  if ((hmark = strchr (hour, ':')))
-    parse_time_specificity_string (hmark, hour);
-
-  free (logitem->time);
-  logitem->time = xstrdup (hour);
-
+  kdata->numdate = logitem->numdate;
   get_kdata (kdata, logitem->time, logitem->time);
+
+  return 0;
+}
+
+/* Generate a unique storage key for the UTM campaign hierarchy.
+ *
+ * On success, the encoded hierarchy key is assigned and 0 is returned.
+ * On failure, 1 is returned. */
+static int
+gen_utm_campaign_key (GKeyData *kdata, GLogItem *logitem) {
+  if (logitem->utm_path == NULL)
+    logitem->utm_path = encode_utm_path (&logitem->utm);
+  if (logitem->utm_path == NULL)
+    return 1;
+
+  get_kdata (kdata, logitem->utm_path, logitem->utm_path);
   kdata->numdate = logitem->numdate;
 
   return 0;
@@ -1358,17 +1655,17 @@ insert_methods_protocols (void) {
  *
  * If it needs to be added, 0 is returned else 1 is returned. */
 static int
-include_uniq (GLogItem * logitem) {
+include_uniq (GLogItem *logitem) {
   int u = conf.client_err_to_unique_count;
 
-  if (!logitem->status || logitem->status[0] != '4' || (u && logitem->status[0] == '4'))
+  if (!logitem->status || (logitem->status / 100) != 4 || (u && (logitem->status / 100) == 4))
     return 1;
   return 0;
 }
 
 /* Determine which data metrics need to be set and set them. */
 static void
-set_datamap (GLogItem * logitem, GKeyData * kdata, const GParse * parse) {
+set_datamap (GLogItem *logitem, GKeyData *kdata, const GParse *parse) {
   GModule module;
   module = parse->module;
 
@@ -1408,10 +1705,16 @@ set_datamap (GLogItem * logitem, GKeyData * kdata, const GParse * parse) {
 
 /* Set data mapping and metrics. */
 static void
-map_log (GLogItem * logitem, const GParse * parse, GModule module) {
+map_log (GLogItem *logitem, const GParse *parse, GModule module) {
   GKeyData kdata;
+#ifdef HAVE_GEOLOCATION
+  char data_buffer[MAX (GEO_CITY_KEY_LEN, INET6_ADDRSTRLEN)];
+#else
+  char data_buffer[INET6_ADDRSTRLEN];
+#endif
 
   new_modulekey (&kdata);
+  kdata.data_buffer = data_buffer;
   /* set key data into out structure */
   if (parse->key_data (&kdata, logitem) == 1)
     return;
@@ -1420,9 +1723,20 @@ map_log (GLogItem * logitem, const GParse * parse, GModule module) {
   if (parse->datamap && kdata.data)
     kdata.data_nkey = insert_dkeymap (module, &kdata);
 
-  /* each module contains a uniq visitor key/value */
-  if (parse->visitor && logitem->uniq_key && include_uniq (logitem))
-    kdata.uniq_nkey = insert_uniqmap (module, &kdata, logitem->uniq_nkey);
+  /* each module contains a uniq visitor key/value; when the data key derives
+   * solely from the visitor key, a visitor is new to this module exactly when
+   * this is their first counted request, so no uniqmap entry is needed */
+  if (parse->visitor && logitem->uniq_key && include_uniq (logitem)) {
+    if (is_vkey_data (parse))
+      kdata.uniq_nkey = logitem->uniq_first;
+    else
+      kdata.uniq_nkey = insert_uniqmap (module, &kdata, logitem->uniq_nkey);
+
+    /* the per-date visitors counter is authoritative for the overall total
+     * and advances exactly when the VISITORS panel counts a visitor */
+    if (module == VISITORS && kdata.uniq_nkey == 1)
+      ht_inc_cnt_visitors (kdata.numdate);
+  }
 
   /* root keys are optional */
   if (parse->rootmap && kdata.root)
@@ -1434,7 +1748,7 @@ map_log (GLogItem * logitem, const GParse * parse, GModule module) {
 }
 
 static void
-ins_agent_key_val (GLogItem * logitem, uint32_t numdate) {
+ins_agent_key_val (GLogItem *logitem, uint32_t numdate) {
   logitem->agent_nkey = ht_insert_agent_key (numdate, logitem->agent_hash);
   /* insert UA key and get a numeric value */
   if (logitem->agent_nkey != 0) {
@@ -1481,7 +1795,7 @@ clean_old_data_by_date (uint32_t numdate) {
 /* Process a log line and set the data into the corresponding data
  * structure. */
 void
-process_log (GLogItem * logitem) {
+process_log (GLogItem *logitem) {
   GModule module;
   const GParse *parse = NULL;
   size_t idx = 0;
@@ -1496,7 +1810,9 @@ process_log (GLogItem * logitem) {
 
   /* Insert one unique visitor key per request to avoid the
    * overhead of storing one key per module */
-  if ((logitem->uniq_nkey = ht_insert_unique_key (numdate, logitem->uniq_key)) == 0)
+  logitem->uniq_nkey =
+    ht_insert_unique_key (numdate, logitem->uniq_key, include_uniq (logitem), &logitem->uniq_first);
+  if (logitem->uniq_nkey == 0)
     return;
 
   /* If we need to store user agents per IP, then we store them and retrieve

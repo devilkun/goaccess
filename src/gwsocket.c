@@ -7,7 +7,7 @@
  * \____/  |__/|__//____/\____/\___/_/|_|\___/\__/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,12 +29,10 @@
  */
 
 #include <stdio.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "gwsocket.h"
@@ -43,9 +41,10 @@
 #include "error.h"
 #include "goaccess.h"
 #include "json.h"
-#include "parser.h"
 #include "settings.h"
 #include "websocket.h"
+#include "wsmessage.h"
+#include "wsauth.h"
 #include "xmalloc.h"
 
 /* Allocate memory for a new GWSReader instance.
@@ -61,11 +60,13 @@ new_gwsreader (void) {
 
 /* Allocate memory for a new GWSWriter instance.
  *
- * On success, the newly allocated GWSWriter is returned. */
+ * On success, the newly allocated GWSWriter is returned.
+ * On failure, the process terminates. */
 GWSWriter *
 new_gwswriter (void) {
   GWSWriter *writer = xmalloc (sizeof (GWSWriter));
   memset (writer, 0, sizeof *writer);
+  writer->fd = -1;
 
   return writer;
 }
@@ -94,7 +95,7 @@ write_holder (int fd, const char *buf, int len) {
 
 /* Clear an incoming FIFO packet and header data. */
 static void
-clear_fifo_packet (GWSReader * gwserver) {
+clear_fifo_packet (GWSReader *gwserver) {
   memset (gwserver->hdr, 0, sizeof (gwserver->hdr));
   gwserver->hlen = 0;
 
@@ -111,7 +112,7 @@ clear_fifo_packet (GWSReader * gwserver) {
  * pipe.
  *
  * On success, 0 is returned . */
-int
+static int
 broadcast_holder (int fd, const char *buf, int len) {
   char *p = NULL, *ptr = NULL;
 
@@ -133,7 +134,7 @@ broadcast_holder (int fd, const char *buf, int len) {
  * pipe.
  *
  * On success, 0 is returned . */
-int
+static int
 send_holder_to_client (int fd, int listener, const char *buf, int len) {
   char *p = NULL, *ptr = NULL;
 
@@ -151,13 +152,36 @@ send_holder_to_client (int fd, int listener, const char *buf, int len) {
   return 0;
 }
 
+/* Retain a complete report as the latest snapshot and broadcast it to every
+ * connected client. The writer takes ownership of the given JSON buffer. */
+void
+publish_snapshot (GWSWriter *gwswriter, char *json) {
+  pthread_mutex_lock (&gwswriter->mutex);
+  free (gwswriter->snapshot);
+  gwswriter->snapshot = json;
+  gwswriter->snapshot_len = strlen (json);
+  broadcast_holder (gwswriter->fd, gwswriter->snapshot, gwswriter->snapshot_len);
+  pthread_mutex_unlock (&gwswriter->mutex);
+}
+
+/* Send the latest published report to a newly connected client. */
+void
+replay_snapshot (GWSWriter *gwswriter, int listener) {
+  pthread_mutex_lock (&gwswriter->mutex);
+  /* clients connecting before the first report is published receive it
+   * through the initial broadcast instead */
+  if (gwswriter->snapshot != NULL)
+    send_holder_to_client (gwswriter->fd, listener, gwswriter->snapshot, gwswriter->snapshot_len);
+  pthread_mutex_unlock (&gwswriter->mutex);
+}
+
 /* Attempt to read data from the named pipe on strict mode.
  * Note: For now it only reads on new connections, i.e., onopen.
  *
  * If there's less data than requested, 0 is returned
  * If the thread is done, 1 is returned */
 int
-read_fifo (GWSReader * gwsreader, void (*f) (int)) {
+read_fifo (GWSReader *gwsreader, void (*f) (int)) {
   WSPacket **pa = &gwsreader->packet;
   char *ptr;
   int bytes = 0, readh = 0, need = 0, fd = gwsreader->fd;
@@ -183,8 +207,8 @@ read_fifo (GWSReader * gwsreader, void (*f) (int)) {
     return 0;
   }
 
-  readh = gwsreader->hlen;      /* read from header so far */
-  need = HDR_SIZE - readh;      /* need to read */
+  readh = gwsreader->hlen; /* read from header so far */
+  need = HDR_SIZE - readh; /* need to read */
   if (need > 0) {
     if ((bytes = ws_read_fifo (fd, gwsreader->hdr, &gwsreader->hlen, readh, need)) < 0)
       return 0;
@@ -205,8 +229,8 @@ read_fifo (GWSReader * gwsreader, void (*f) (int)) {
     (*pa)->data = xcalloc (size + 1, sizeof (char));
   }
 
-  readh = (*pa)->len;   /* read from payload so far */
-  need = (*pa)->size - readh;   /* need to read */
+  readh = (*pa)->len; /* read from payload so far */
+  need = (*pa)->size - readh; /* need to read */
   if (need > 0) {
     if ((bytes = ws_read_fifo (fd, (*pa)->data, &(*pa)->len, readh, need)) < 0)
       return 0;
@@ -225,7 +249,7 @@ read_fifo (GWSReader * gwsreader, void (*f) (int)) {
  * It writes to a named pipe a header containing the socket, the
  * message type, the payload's length and the actual payload */
 static int
-onopen (WSPipeOut * pipeout, WSClient * client) {
+onopen (WSPipeOut *pipeout, WSClient *client) {
   uint32_t hsize = sizeof (uint32_t) * 3;
   char *hdr = calloc (hsize, sizeof (char));
   char *ptr = hdr;
@@ -240,6 +264,92 @@ onopen (WSPipeOut * pipeout, WSClient * client) {
 
   return 0;
 }
+
+/* Mark an authentication control message as failed and close its client. */
+#ifdef HAVE_LIBSSL
+static void
+reject_token_message (WSClient *client, const char *reason) {
+  LOG (("%s for client %d [%s]\n", reason, client->listener, client->remote_ip));
+  client->status = WS_ERR | WS_CLOSE;
+}
+#endif
+
+/* Validate a bounded token-control payload and update the client's JWT.
+ *
+ * On success, 1 is returned and the verified token replaces the stored JWT.
+ * On failure, -1 is returned and the client is marked for closure.
+ * For an unrelated client message, 0 is returned. */
+#ifdef HAVE_LIBSSL
+static int
+validate_token_message (const char *payload, size_t payloadsz, WSClient *client) {
+  WSTokenMessage message = { 0 };
+  WSTokenParseResult parsed = WS_TOKEN_PARSE_ERROR;
+  char *new_token = NULL;
+  time_t auth_expiry = 0;
+
+  parsed = ws_parse_token_message (payload, payloadsz, &message);
+
+  if (parsed == WS_TOKEN_PARSE_ERROR) {
+    reject_token_message (client, "Malformed WebSocket control message");
+    ws_free_token_message (&message);
+    return -1;
+  }
+
+  if (parsed == WS_TOKEN_PARSE_OTHER) {
+    ws_free_token_message (&message);
+    return 0;
+  }
+
+  if (!message.is_validation) {
+    ws_free_token_message (&message);
+    return 0;
+  }
+
+  if (!message.is_valid) {
+    reject_token_message (client, "Invalid validate_token message");
+    ws_free_token_message (&message);
+    return -1;
+  }
+
+  if (conf.ws_auth_secret == NULL ||
+      verify_jwt_token (message.token, conf.ws_auth_secret, &auth_expiry) != 1) {
+    reject_token_message (client, "Authentication failed");
+    ws_free_token_message (&message);
+    return -1;
+  }
+
+  new_token = xstrdup (message.token);
+  if (client->headers->jwt)
+    free (client->headers->jwt);
+
+  client->headers->jwt = new_token;
+  client->auth_expiry = auth_expiry;
+  LOG (("Token validated and updated for client %d [%s]\n", client->listener, client->remote_ip));
+
+  ws_free_token_message (&message);
+  return 1;
+}
+#endif
+
+/* Handle an incoming WebSocket message that may update authentication.
+ *
+ * On success, 1 is returned when the client authenticated.
+ * On failure, -1 is returned.
+ * For an unrelated or empty message, 0 is returned. */
+#ifdef HAVE_LIBSSL
+static int
+onmessage (GO_UNUSED WSPipeOut *pipeout, WSClient *client) {
+  WSMessage *message = client->message;
+
+  if (message->opcode != WS_OPCODE_TEXT)
+    return 0;
+
+  if (message->payload == NULL || message->payloadsz <= 0)
+    return 0;
+
+  return validate_token_message (message->payload, (size_t) message->payloadsz, client);
+}
+#endif
 
 /* Done parsing, clear out line and set status message. */
 void
@@ -294,13 +404,12 @@ set_self_pipe (int *self_pipe) {
 
 /* Close the WebSocket server and clean up. */
 void
-stop_ws_server (GWSWriter * gwswriter, GWSReader * gwsreader) {
+stop_ws_server (GWSWriter *gwswriter, GWSReader *gwsreader) {
   pthread_t writer, reader;
   WSServer *server = NULL;
+  int ret = 0;
 
   if (!gwsreader || !gwswriter)
-    return;
-  if (!(server = gwswriter->server))
     return;
 
   pthread_mutex_lock (&gwsreader->mutex);
@@ -308,35 +417,48 @@ stop_ws_server (GWSWriter * gwswriter, GWSReader * gwsreader) {
     LOG (("Unable to write to self pipe on pipeout.\n"));
   pthread_mutex_unlock (&gwsreader->mutex);
 
-  /* if it fails to write, force stop */
   pthread_mutex_lock (&gwswriter->mutex);
-  if ((write (server->self_pipe[1], "x", 1)) == -1 && errno != EAGAIN)
-    ws_stop (server);
+  server = gwswriter->server;
+  if (server && (write (server->self_pipe[1], "x", 1)) == -1 && errno != EAGAIN)
+    LOG (("Unable to write to WebSocket server self pipe.\n"));
   pthread_mutex_unlock (&gwswriter->mutex);
 
   reader = gwsreader->thread;
-  if (pthread_join (reader, NULL) != 0)
-    LOG (("Unable to join thread gwsreader: %s\n", strerror (errno)));
+  if ((ret = pthread_join (reader, NULL)) != 0)
+    LOG (("Unable to join thread gwsreader: %s\n", strerror (ret)));
 
   writer = gwswriter->thread;
-  if (pthread_join (writer, NULL) != 0)
-    LOG (("Unable to join thread gwswriter: %s\n", strerror (errno)));
+  if ((ret = pthread_join (writer, NULL)) != 0)
+    LOG (("Unable to join thread gwswriter: %s\n", strerror (ret)));
+
+  if (gwswriter->fd != -1) {
+    close (gwswriter->fd);
+    gwswriter->fd = -1;
+  }
+
+  free (gwswriter->snapshot);
+  gwswriter->snapshot = NULL;
+  gwswriter->snapshot_len = 0;
 }
 
-/* Start the WebSocket server and initialize default options. */
-static void
+/* Run the WebSocket server until the controlling thread requests completion.
+ *
+ * On success, NULL is returned.
+ * On failure, NULL is returned. */
+static void *
 start_server (void *ptr_data) {
   GWSWriter *writer = (GWSWriter *) ptr_data;
+  WSServer *server = writer->server;
 
-  writer->server->onopen = onopen;
+  ws_start (server);
+  fprintf (stderr, "Stopping WebSocket server...\n");
+
   pthread_mutex_lock (&writer->mutex);
-  set_self_pipe (writer->server->self_pipe);
+  writer->server = NULL;
+  ws_stop (server);
   pthread_mutex_unlock (&writer->mutex);
 
-  /* poll(2) will block in here */
-  ws_start (writer->server);
-  fprintf (stderr, "Stopping WebSocket server...\n");
-  ws_stop (writer->server);
+  return NULL;
 }
 
 /* Read and set the WebSocket config options. */
@@ -359,13 +481,23 @@ set_ws_opts (void) {
     ws_set_config_sslcert (conf.sslcert);
   if (conf.sslkey)
     ws_set_config_sslkey (conf.sslkey);
+#ifdef HAVE_LIBSSL
+  if (conf.ws_auth_secret) {
+    ws_set_config_auth_secret (conf.ws_auth_secret);
+    ws_set_config_auth_cb (verify_jwt_token);
+  }
+#endif
 }
 
-/* Setup and start the WebSocket threads. */
+/* Set up and start the WebSocket threads.
+ *
+ * On success, 0 is returned.
+ * On failure, this function does not return. */
 int
-setup_ws_server (GWSWriter * gwswriter, GWSReader * gwsreader) {
-  int id;
-  pthread_t *thread;
+setup_ws_server (GWSWriter *gwswriter, GWSReader *gwsreader) {
+  WSServer *server = NULL;
+  pthread_t *thread = NULL;
+  int id = 0;
 
   if (pthread_mutex_init (&gwswriter->mutex, NULL))
     FATAL ("Failed init gwswriter mutex");
@@ -379,13 +511,23 @@ setup_ws_server (GWSWriter * gwswriter, GWSReader * gwsreader) {
   if ((gwswriter->server = ws_init ("0.0.0.0", "7890", set_ws_opts)) == NULL)
     FATAL ("Failed init websocket");
 
-  id = pthread_create (&(*thread), NULL, (void *) &start_server, gwswriter);
+  server = gwswriter->server;
+  server->onopen = onopen;
+#ifdef HAVE_LIBSSL
+  if (conf.ws_auth_secret)
+    server->onmessage = onmessage;
+#endif
+
+  set_self_pipe (server->self_pipe);
+  set_self_pipe (gwsreader->self_pipe);
+
+  id = pthread_create (&(*thread), NULL, start_server, gwswriter);
   if (id)
     FATAL ("Return code from pthread_create(): %d", id);
 
   /* read WS data thread */
   thread = &gwsreader->thread;
-  id = pthread_create (&(*thread), NULL, (void *) &read_client, gwsreader);
+  id = pthread_create (&(*thread), NULL, read_client, gwsreader);
   if (id)
     FATAL ("Return code from pthread_create(): %d", id);
 

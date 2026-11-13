@@ -11,6 +11,57 @@
 
 'use strict';
 
+const MAP_FULLSCREEN_CLASS = 'map-fullscreen';
+const MAP_FULLSCREEN_BODY_CLASS = 'map-fullscreen-open';
+const MAP_FULLSCREEN_MIN_HEIGHT = 400;
+const MAP_FULLSCREEN_HORIZONTAL_MARGIN = 16;
+const MAP_LEGEND_HEIGHT = 30;
+// Geographic viewing centers in longitude/latitude degrees, keyed by GeoIP continent code.
+const MAP_CONTINENT_CENTERS = {
+	AF: [20, 0],
+	AN: [0, -90],
+	AS: [100, 35],
+	EU: [15, 50],
+	NA: [-100, 45],
+	OC: [140, -25],
+	SA: [-60, -15]
+};
+
+// Update the map control to describe the action it will perform.
+function setMapFullscreenControlState(control, expanded) {
+	var label = expanded ? 'Collapse map' : 'Expand map';
+	var icon = control.select('i');
+
+	control
+		.attr('aria-label', label)
+		.attr('aria-pressed', expanded ? 'true' : 'false')
+		.attr('title', label);
+	icon
+		.classed('fa-arrows-alt', !expanded)
+		.classed('fa-window-restore', expanded);
+}
+
+// Remove fullscreen state and controls from a map container.
+function clearMapFullscreen(selection) {
+	if (!selection || selection.empty()) return;
+
+	selection
+		.classed(MAP_FULLSCREEN_CLASS, false)
+		.on('.map-fullscreen', null)
+		.selectAll('.map-fullscreen-toggle')
+		.remove();
+	d3.select('body').classed(MAP_FULLSCREEN_BODY_CLASS,
+		!d3.select('.' + MAP_FULLSCREEN_CLASS).empty());
+}
+
+// Let Escape collapse the currently expanded map.
+d3.select(document).on('keydown.map-fullscreen', function(event) {
+	if (event.key !== 'Escape') return;
+
+	var control = d3.select('.' + MAP_FULLSCREEN_CLASS + ' .map-fullscreen-toggle');
+	if (!control.empty()) control.node().click();
+});
+
 // This is faster than calculating the exact length of each label.
 // e.g., getComputedTextLength(), slice()...
 function truncate(text, width) {
@@ -35,6 +86,795 @@ function truncate(text, width) {
 			}.bind(this));
 		}
 	});
+}
+
+function WorldMap(selection) {
+	const maxLat = 84;
+	let path = null;
+	let projection = null;
+	let tlast = [0, 0];
+	let slast = null;
+	let opts = {};
+	let metric = 'hits';
+	let margin = {
+		top: 20,
+		right: 50,
+		bottom: 40,
+		left: 50
+	};
+	let normalLeftMargin = margin.left;
+	let normalRightMargin = margin.right;
+	let width = 760;
+	let height = 170;
+	let normalHeight = height;
+	let renderedHeight = 0;
+	let renderedProjectionType = null;
+	let renderedWidth = 0;
+	// default value; will be set externally
+	let projectionType = 'mercator';
+	let initialScale;
+	let panelName = null;
+	let cityIndex = null;
+	let citySizeScale = null;
+
+	function innerW() {
+		return width - margin.left - margin.right;
+	}
+
+	function innerH() {
+		return height - margin.top - margin.bottom;
+	}
+
+	function getStyleSize(value) {
+		return parseFloat(value) || 0;
+	}
+
+	function getContentSize(selectionElem) {
+		var style = window.getComputedStyle(selectionElem);
+		var horizontalPadding = getStyleSize(style.paddingLeft) + getStyleSize(style.paddingRight);
+		var verticalPadding = getStyleSize(style.paddingTop) + getStyleSize(style.paddingBottom);
+
+		return {
+			width: selectionElem.clientWidth - horizontalPadding,
+			height: selectionElem.clientHeight - verticalPadding
+		};
+	}
+
+	function syncDimensions(selectionElem) {
+		var expanded = selectionElem.classList.contains(MAP_FULLSCREEN_CLASS);
+		var size = getContentSize(selectionElem);
+
+		margin.left = expanded ? MAP_FULLSCREEN_HORIZONTAL_MARGIN : normalLeftMargin;
+		margin.right = expanded ? MAP_FULLSCREEN_HORIZONTAL_MARGIN : normalRightMargin;
+		width = size.width;
+		height = expanded
+			? Math.max(MAP_FULLSCREEN_MIN_HEIGHT, size.height - MAP_LEGEND_HEIGHT)
+			: normalHeight;
+	}
+
+	function dimensionsChanged() {
+		return renderedWidth !== width || renderedHeight !== height ||
+			renderedProjectionType !== projectionType;
+	}
+
+	function resetMap(selection) {
+		selection.selectAll('svg.map, svg.legend-svg').remove();
+		tlast = [0, 0];
+		slast = null;
+	}
+
+	function addFullscreenControl(selection) {
+		var control = selection.select('.map-fullscreen-toggle');
+
+		if (control.empty()) {
+			control = selection.append('button')
+				.attr('class', 'btn btn-default btn-sm map-fullscreen-toggle')
+				.attr('type', 'button');
+			control.append('i')
+				.attr('class', 'fa fa-arrows-alt')
+				.attr('aria-hidden', 'true');
+		}
+
+		setMapFullscreenControlState(control, selection.classed(MAP_FULLSCREEN_CLASS));
+		control.on('click.map-fullscreen', function(event) {
+			var expanded = !selection.classed(MAP_FULLSCREEN_CLASS);
+
+			event.preventDefault();
+			selection.classed(MAP_FULLSCREEN_CLASS, expanded);
+			d3.select('body').classed(MAP_FULLSCREEN_BODY_CLASS, expanded);
+			setMapFullscreenControlState(control, expanded);
+			resetMap(selection);
+			selection.call(chart);
+		});
+	}
+
+	function buildCityIndex() {
+		if (cityIndex) return;
+		var cityData = window.cities10m;
+		if (!cityData) return;
+		cityIndex = {};
+		var features = topojson.feature(cityData, cityData.objects.cities).features;
+		features.forEach(function(f) {
+			var p = f.properties;
+			var iso = (p.ISO_A2 || '').toUpperCase();
+			var asciiKey = iso + '|' + (p.NAMEASCII || '').toLowerCase().trim();
+			cityIndex[asciiKey] = f;
+			var nameKey = iso + '|' + (p.NAME || '').toLowerCase().trim();
+			if (nameKey !== asciiKey)
+				cityIndex[nameKey] = f;
+		});
+	}
+
+	function collectCities(country, code) {
+		var out = [];
+		if (!country.items) return out;
+		country.items.forEach(function(city) {
+			out.push({
+				data: city.data,
+				countryCode: code,
+				hits: city.hits.count,
+				visitors: city.visitors.count,
+				bytes: city.bytes.count
+			});
+		});
+		return out;
+	}
+
+	function isCityVisible(coords) {
+		if (projectionType !== 'orthographic') return true;
+		var rotate = projection.rotate();
+		var center = [-rotate[0], -rotate[1]];
+		return d3.geoDistance(coords, center) < Math.PI / 2;
+	}
+
+	function getMapRenderState() {
+		if (!panelName) return null;
+
+		var fullData = (GoAccess.getPanelData(panelName) || {}).data || [];
+		var expanded = GoAccess.Util.getProp(GoAccess.AppState, panelName + '.expanded') || {};
+
+		var allCountries = [];
+		var highlightCodes = new Set();
+		var expandedCountryCodes = new Set();
+		var cities = [];
+
+		var expandedContinents = new Set();
+
+		// pass 1: detect expanded continents and collect countries
+		fullData.forEach(function(continent) {
+			if (!continent.items) return;
+
+			var continentKey = GoAccess.Util.hashCode(continent.data);
+			if (expanded[continentKey]) {
+				expandedContinents.add(continentKey);
+			}
+
+			continent.items.forEach(function(country) {
+				var code = country.data.split(' ')[0];
+				allCountries.push({
+					data: country.data,
+					hits: country.hits.count,
+					visitors: country.visitors.count,
+					bytes: country.bytes.count,
+					region: continent.data
+				});
+			});
+		});
+
+		var hasExpandedContinent = expandedContinents.size > 0;
+
+		// pass 2: resolve each continent independently
+		fullData.forEach(function(continent) {
+			if (!continent.items) return;
+
+			var continentKey = GoAccess.Util.hashCode(continent.data);
+			var isContinentExpanded = expandedContinents.has(continentKey);
+
+			// if nothing expanded, treat all continents as expanded
+			if (!hasExpandedContinent) {
+				isContinentExpanded = true;
+			}
+
+			if (!isContinentExpanded) return;
+
+			// detect expanded countries inside this continent
+			var localExpandedCountries = new Set();
+
+			continent.items.forEach(function(country) {
+				var code = country.data.split(' ')[0];
+				var countryKey = GoAccess.Util.hashCode(country.data);
+				if (expanded[countryKey]) {
+					localExpandedCountries.add(code);
+					expandedCountryCodes.add(code);
+				}
+			});
+
+			var hasLocalExpanded = localExpandedCountries.size > 0;
+
+			continent.items.forEach(function(country) {
+				var code = country.data.split(' ')[0];
+
+				// highlight logic
+				if (hasLocalExpanded) {
+					if (localExpandedCountries.has(code)) {
+						highlightCodes.add(code);
+					}
+				} else {
+					highlightCodes.add(code);
+				}
+
+				// city logic
+				if (hasLocalExpanded) {
+					if (localExpandedCountries.has(code)) {
+						cities = cities.concat(collectCities(country, code));
+					}
+				} else {
+					cities = cities.concat(collectCities(country, code));
+				}
+			});
+		});
+
+		// nothing expanded at all -> show everything
+		if (!hasExpandedContinent) {
+			highlightCodes = null;
+			cities = [];
+
+			fullData.forEach(function(continent) {
+				if (!continent.items) return;
+				continent.items.forEach(function(country) {
+					var code = country.data.split(' ')[0];
+					cities = cities.concat(collectCities(country, code));
+				});
+			});
+		}
+
+		return {
+			allCountries: allCountries,
+			highlightCodes: highlightCodes,
+			expandedCountryCodes: expandedCountryCodes.size
+				? expandedCountryCodes
+				: null,
+			cities: cities
+		};
+	}
+
+	function formatTooltip(data) {
+		const d = {
+			...data
+		};
+		let out = {};
+		out[0] = GoAccess.Util.fmtValue(d['data'], 'str');
+		out[1] = metric === 'bytes' ? GoAccess.Util.fmtValue(d['bytes'], 'bytes') : d3.format(',')(d['hits']);
+		if (metric === 'hits') out[2] = d3.format(',')(d['visitors']);
+		const template = d3.select('#tpl-chart-tooltip')
+			.html();
+		return Hogan.compile(template)
+			.render({
+				'data': out
+			});
+	}
+
+	function mouseover(event, selection, data) {
+		const tooltip = selection.select('.chart-tooltip-wrap');
+		tooltip.html(formatTooltip(data))
+			.style('left', `${d3.pointer(event)[0] + 10}px`)
+			.style('top', `${d3.pointer(event)[1] + 10}px`)
+			.style('display', 'block');
+	}
+
+	function mouseout(selection) {
+		const tooltip = selection.select('.chart-tooltip-wrap');
+		tooltip.style('display', 'none');
+	}
+
+	function drawLegend(selection, colorScale) {
+		const legendHeight = 10;
+		const legendPadding = 10;
+		let svg = selection.select('.legend-svg');
+		if (svg.empty()) {
+			svg = selection.append('svg')
+				.attr('class', 'legend-svg')
+				.attr('width', width)
+				.attr('height', legendHeight + 2 * legendPadding);
+		}
+		let legend = svg.select('.legend');
+		if (legend.empty()) {
+			legend = svg.append('g')
+				.attr('class', 'legend')
+				.attr('transform', `translate(${margin.left}, ${legendPadding})`);
+		}
+		const legendData = colorScale.quantiles();
+		const legendRects = legend.selectAll('rect')
+			.data(legendData);
+		legendRects.enter()
+			.append('rect')
+			.merge(legendRects)
+			.attr('x', (d, i) => (i * (innerW())) / legendData.length)
+			.attr('y', 0)
+			.attr('width', innerW() / legendData.length)
+			.attr('height', legendHeight)
+			.style('fill', d => colorScale(d));
+		legendRects.exit()
+			.remove();
+		const legendTexts = legend.selectAll('text')
+			.data(legendData);
+		legendTexts.enter()
+			.append('text')
+			.merge(legendTexts)
+			.attr('x', (d, i) => (i * (innerW())) / legendData.length)
+			.attr('y', legendHeight + legendPadding)
+			.style('font-size', '10px')
+			.attr('text-anchor', 'middle')
+			.text(d => metric === 'bytes' ? GoAccess.Util.fmtValue(d, 'bytes') : d3.format(',')(d));
+		legendTexts.exit()
+			.remove();
+	}
+
+	function updateSphere(svg, g) {
+		if (projectionType === 'orthographic') {
+			let sphere = g.selectAll('.sphere')
+				.data([{
+					type: 'Sphere'
+				}]);
+			// Insert as first child to be behind countries
+			let sphereEnter = sphere.enter()
+				.insert('path', ':first-child')
+				.attr('class', 'sphere')
+				.attr('d', path)
+				.attr('fill', '#DDEEFF') /* Light blue for ocean */
+				.attr('opacity', 0);
+			sphere = sphereEnter.merge(sphere);
+			sphere.transition()
+				.duration(500)
+				.attr('opacity', 1);
+		} else {
+			// Remove sphere when not in orthographic projection
+			g.selectAll('.sphere')
+				.transition()
+				.duration(500)
+				.attr('opacity', 0)
+				.remove();
+		}
+	}
+
+	function updateMap(selection, svg, data, countries, countryNameToGeoJson) {
+		buildCityIndex();
+
+		var state = getMapRenderState();
+		var activeData;
+		if (state) {
+			activeData = state.allCountries;
+		} else {
+			// Fallback: flatten data the old way when panel is not set
+			activeData = data.reduce(function(acc, region) {
+				if (!region.items) acc.push(region);
+				else region.items.forEach(function(item) {
+					acc.push({
+						data: item.data,
+						hits: item.hits.count !== undefined ? item.hits.count : item.hits,
+						visitors: item.visitors.count !== undefined ? item.visitors.count : item.visitors,
+						bytes: item.bytes.count !== undefined ? item.bytes.count : item.bytes,
+						region: region.data
+					});
+				});
+				return acc;
+			}, []);
+			state = { allCountries: activeData, highlightCodes: null, expandedCountryCodes: null, cities: [] };
+		}
+
+		path = d3.geoPath()
+			.projection(projection);
+
+		const colorScale = d3.scaleQuantile()
+			.domain(activeData.map(d => d[metric]))
+			.range(['#eafff1', '#a7e3d7', '#6cc5c0', '#44a2b1', '#246e96']);
+
+		if (activeData.length)
+			drawLegend(selection, colorScale);
+
+		// Create a mapping from country code to data
+		const dataByName = {};
+		activeData.forEach(d => {
+			const k = d.data.split(' ')[0];
+			dataByName[k] = d;
+		});
+
+		// Add graticule (grid lines)
+		if (projectionType !== 'mercator') {
+			const graticule = d3.geoGraticule();
+			let grid = svg.select('g')
+				.selectAll('.graticule')
+				.data([graticule()]);
+			let gridEnter = grid.enter()
+				.append('path')
+				.attr('class', 'graticule')
+				.attr('d', path)
+				.attr('fill', 'none')
+				.attr('stroke', '#ccc')
+				.attr('stroke-width', 0.5)
+				.attr('stroke-dasharray', '3,3')
+				.attr('opacity', 0);
+			grid = gridEnter.merge(grid);
+			grid.transition()
+				.duration(500)
+				.attr('opacity', 0.4);
+		}
+
+		let country = svg.select('g')
+			.selectAll('.country')
+			.data(countries);
+		let countryEnter = country.enter()
+			.append('path')
+			.attr('class', 'country')
+			.attr('d', path)
+			.attr('opacity', 0);
+		country = countryEnter.merge(country)
+			.on('mouseover', function(event, d) {
+				const countryData = dataByName[d.id];
+				if (countryData) mouseover(event, selection, countryData);
+			})
+			.on('mouseout', function() {
+				mouseout(selection);
+			});
+		country.transition()
+			.duration(500)
+			.style('fill', function(d) {
+				const countryData = dataByName[d.id];
+				if (!countryData) return '#cccccc54';
+				if (state.highlightCodes) {
+					return state.highlightCodes.has(d.id)
+						? colorScale(countryData[metric])
+						: '#cccccc30';
+				}
+				return colorScale(countryData[metric]);
+			})
+			.attr('opacity', 1);
+		country.exit()
+			.transition()
+			.duration(500)
+			.attr('opacity', 0)
+			.remove();
+
+		// Update city markers
+		updateCities(selection, svg, state, colorScale);
+	}
+
+	function updateCities(selection, svg, state, colorScale) {
+		var g = svg.select('g');
+		var cityMarkers = [];
+
+		if (state.cities.length && cityIndex) {
+			state.cities.forEach(function(c) {
+				var key = c.countryCode.toUpperCase() + '|' + c.data.toLowerCase().trim();
+				var feature = cityIndex[key];
+				if (feature) {
+					cityMarkers.push({
+						feature: feature,
+						data: c.data,
+						hits: c.hits,
+						visitors: c.visitors,
+						bytes: c.bytes
+					});
+				}
+			});
+		}
+
+		var sizeExtent = d3.extent(cityMarkers, function(d) { return d[metric]; });
+		if (!sizeExtent[0] && !sizeExtent[1]) sizeExtent = [0, 1];
+		var sizeScale = d3.scaleSqrt()
+			.domain(sizeExtent)
+			.range([3, 10])
+			.clamp(true);
+		var strokeScale = d3.scaleSqrt()
+			.domain(sizeExtent)
+			.range([1, 2.5])
+			.clamp(true);
+
+		citySizeScale = sizeScale;
+
+		var circles = g.selectAll('.city-marker')
+			.data(cityMarkers, function(d) { return d.data + '|' + d.feature.properties.ISO_A2; });
+
+		circles.exit()
+			.transition().duration(300)
+			.attr('r', 0)
+			.remove();
+
+		var circlesEnter = circles.enter()
+			.append('circle')
+			.attr('class', 'city-marker')
+			.attr('r', 0)
+			.style('fill', '#ff6b6b')
+			.style('stroke', '#fff')
+			.style('cursor', 'pointer')
+			.on('mouseover', function(event, d) {
+				mouseover(event, selection, d);
+			})
+			.on('mouseout', function() {
+				mouseout(selection);
+			});
+
+		circlesEnter.merge(circles)
+			.transition().duration(500)
+			.attr('cx', function(d) {
+				if (!isCityVisible(d.feature.geometry.coordinates)) return -9999;
+				var coords = projection(d.feature.geometry.coordinates);
+				return coords ? coords[0] : -9999;
+			})
+			.attr('cy', function(d) {
+				if (!isCityVisible(d.feature.geometry.coordinates)) return -9999;
+				var coords = projection(d.feature.geometry.coordinates);
+				return coords ? coords[1] : -9999;
+			})
+			.attr('r', function(d) {
+				if (!isCityVisible(d.feature.geometry.coordinates)) return 0;
+				var coords = projection(d.feature.geometry.coordinates);
+				return coords ? sizeScale(d[metric]) : 0;
+			})
+			.style('fill', '#ff6b6b')
+			.style('stroke', '#fff')
+			.style('stroke-width', function(d) {
+				return strokeScale(d[metric]) + 'px';
+			});
+	}
+
+	function setBounds(projection, maxLat) {
+		// Top-left corner of the ~viewable~ lat
+		const [yaw] = projection.rotate();
+		const xymax = projection([-yaw + 180 - 1e-6, -maxLat]);
+		const xymin = projection([-yaw - 180 + 1e-6, maxLat]);
+		return [xymin, xymax];
+	}
+
+	function clampVertical(projection, maxLat, height) {
+		const b = setBounds(projection, maxLat);
+		// top-left
+		const [xMin, yMin] = b[0];
+		// bottom-right
+		const [xMax, yMax] = b[1];
+		const t = projection.translate();
+		// If the top (yMin) is now below 0, shift upward.
+		if (yMin > 0)
+			t[1] -= yMin;
+		// If the bottom (yMax) is now above the container height, shift downward.
+		else if (yMax < height)
+			t[1] += (height - yMax);
+		projection.translate(t);
+	}
+
+	function baseScale() {
+		// If the effective width is small, use a fixed mobile scale; otherwise use the computed scale.
+		return innerW() < 400 ? 150 : innerW() / (2 * Math.PI);
+	}
+
+	function setProjection(type) {
+		var rotation = projection && renderedProjectionType === type ? projection.rotate() : [0, 0, 0];
+
+		if (type === 'mercator') {
+			const bScale = baseScale();
+			projection = d3.geoMercator()
+				.center([0, 15])
+				.scale(bScale)
+				.translate([innerW() / 2, height / 1.5]);
+		} else if (type === 'orthographic') {
+			const globeScale = Math.min(innerW(), height) / 1.5;
+			projection = d3.geoOrthographic()
+				.scale(globeScale)
+				.translate([innerW() / 2, height / 2])
+				.rotate(rotation);
+		}
+		initialScale = projection.scale();
+		path = d3.geoPath().projection(projection);
+	}
+
+	// Redraw map geometry and city markers using the current projection.
+	function redrawMap(g) {
+		g.selectAll('path')
+			.attr('d', path);
+		g.selectAll('.city-marker')
+			.attr('cx', function(d) {
+				if (!isCityVisible(d.feature.geometry.coordinates)) return -9999;
+				var coords = projection(d.feature.geometry.coordinates);
+				return coords ? coords[0] : -9999;
+			})
+			.attr('cy', function(d) {
+				if (!isCityVisible(d.feature.geometry.coordinates)) return -9999;
+				var coords = projection(d.feature.geometry.coordinates);
+				return coords ? coords[1] : -9999;
+			})
+			.attr('r', function(d) {
+				if (!isCityVisible(d.feature.geometry.coordinates)) return 0;
+				return citySizeScale ? citySizeScale(d[metric]) : 0;
+			});
+	}
+
+	function zoomed(event, scaleExtent, g) {
+		const scale = event.transform.k;
+		if (projectionType === 'mercator') {
+			const containerCenter = [innerW() / 2, height / 2];
+			let anchor = containerCenter;
+			if (Math.abs(scale - slast) > 1e-3) {
+				const geoCoord = projection.invert(anchor);
+				// Use baseScale() here instead of innerW()/(2*Math.PI)
+				projection.scale(scale * baseScale());
+				const newPixel = projection(geoCoord);
+				const dxAnchor = anchor[0] - newPixel[0];
+				const dyAnchor = anchor[1] - newPixel[1];
+				const t = projection.translate();
+				projection.translate([t[0] + dxAnchor, t[1] + dyAnchor]);
+				clampVertical(projection, maxLat, height);
+			} else {
+				const newX = event.transform.x;
+				const newY = event.transform.y;
+				const dx = newX - tlast[0];
+				const dy = newY - tlast[1];
+				let [longitude] = projection.rotate();
+				longitude += 360 * (dx / width) * (scaleExtent[0] / scale);
+				projection.rotate([longitude, 0, 0]);
+				const t = projection.translate();
+				t[1] += dy;
+				projection.translate(t);
+				clampVertical(projection, maxLat, height);
+			}
+		}
+		else if (projectionType === 'orthographic') {
+			// Use the zoom transform's k to compute a new scale,
+			// clamping to a maximum factor (here, 2x the initialScale).
+			let newScale = scale * initialScale;
+			const maxOrthoScale = initialScale * 2;
+			if (newScale > maxOrthoScale) newScale = maxOrthoScale;
+			if (newScale < initialScale) newScale = initialScale;
+			projection.scale(newScale);
+
+			// Update rotation using the difference between the current and previous transform values.
+			const dx = event.transform.x - tlast[0];
+			const dy = event.transform.y - tlast[1];
+			let [longitude, latitude] = projection.rotate();
+
+			// we could reduce sensitivity for smoother rotation
+			const sensitivity = 0.2;
+			longitude += dx * sensitivity;
+			latitude -= dy * sensitivity;
+			latitude = Math.max(-90, Math.min(90, latitude));
+			projection.rotate([longitude, latitude, 0]);
+		}
+		redrawMap(g);
+		tlast = [event.transform.x, event.transform.y];
+		slast = scale;
+	}
+
+	function createSVG(selectionElem) {
+		const svg = d3.select(selectionElem)
+			.append('svg')
+			.attr('class', 'map')
+			.attr('style', 'display:block; margin:auto;')
+			.attr('width', innerW())
+			.attr('height', height)
+			.lower();
+		const g = svg.append('g')
+			.attr('transform', 'translate(0,0)');
+
+		// Use the externally provided projectionType
+		setProjection(projectionType);
+		// Compute scale extent based on projection type.
+		let scaleExtent;
+		if (projectionType === 'mercator') {
+			// For cellphones (narrow screens), use a fixed scale and limit zoom-out to the initial state.
+			if (innerW() < 400) {
+				// Here 1 means the initial zoom level (no zoom-out), 6 is arbitrary for max zoom in.
+				scaleExtent = [1, 6];
+			} else {
+				// Otherwise, calculate the base scale from the bounds.
+				const bounds = setBounds(projection, maxLat);
+				const s = innerW() / (bounds[1][0] - bounds[0][0]);
+				scaleExtent = [s, 6 * s];
+			}
+		} else if (projectionType === 'orthographic') {
+			// For orthographic, let d3.zoom use a relative scale factor.
+			// The identity transform (k = 1) corresponds to the initialScale,
+			// and we allow zooming from 1x to 2x.
+			scaleExtent = [1, 2];
+		}
+		const zoom = d3.zoom()
+			.scaleExtent(scaleExtent)
+			.on('zoom', event => {
+				zoomed(event, scaleExtent, g);
+			});
+		svg.call(zoom);
+		return {
+			svg,
+			g
+		};
+	}
+
+	function chart(selectionData) {
+		selectionData.each(function(data) {
+			var chartSelection = d3.select(this);
+			const worldData = window.countries110m;
+			const countries = topojson.feature(worldData, worldData.objects.countries)
+				.features; /* Build a mapping from country names to GeoJSON if needed */
+			const countryNameToGeoJson = {};
+			countries.forEach(country => {
+				countryNameToGeoJson[country.properties.name] = country;
+			});
+			syncDimensions(this);
+			if (dimensionsChanged()) resetMap(chartSelection);
+			addFullscreenControl(chartSelection);
+
+			let svgObj = chartSelection
+				.select('svg.map');
+			let g;
+			if (svgObj.empty()) {
+				const created = createSVG(this);
+				svgObj = created.svg;
+				g = created.g;
+			} else {
+				/* If the SVG already exists, select its group */
+				g = svgObj.select('g');
+			}
+			updateMap(chartSelection, svgObj, data, countries, countryNameToGeoJson); /* Update sphere in case the projection is orthographic */
+			updateSphere(svgObj, g);
+			renderedWidth = width;
+			renderedHeight = height;
+			renderedProjectionType = projectionType;
+		});
+	}
+
+	// Center the globe on a continent while preserving its zoom.
+	// On success, the globe is rotated and the chart is returned.
+	// If the continent or projection is unsupported, the chart is returned unchanged.
+	chart.focusContinent = function(label) {
+		var center = MAP_CONTINENT_CENTERS[label.split(' ')[0]];
+		var svg = selection.select('svg.map');
+
+		if (projectionType !== 'orthographic' || !projection || !center || svg.empty())
+			return chart;
+
+		projection.rotate([-center[0], -center[1], 0]);
+		redrawMap(svg.select('g'));
+		return chart;
+	};
+
+	// Getter-setter for metric
+	chart.metric = function(_) {
+		if (!arguments.length) return metric;
+		metric = _;
+		return chart;
+	};
+	// Getter-setter for opts
+	chart.opts = function(_) {
+		if (!arguments.length) return opts;
+		opts = _;
+		return chart;
+	};
+	// Getter-setter for width
+	chart.width = function(_) {
+		if (!arguments.length) return width;
+		width = _;
+		return chart;
+	};
+	// Getter-setter for height
+	chart.height = function(_) {
+		if (!arguments.length) return height;
+		height = _;
+		normalHeight = _;
+		return chart;
+	};
+	// Getter-setter for projectionType
+	chart.projectionType = function(_) {
+		if (!arguments.length) return projectionType;
+		projectionType = _;
+		return chart;
+	};
+	// Getter-setter for panel name
+	chart.panel = function(_) {
+		if (!arguments.length) return panelName;
+		panelName = _;
+		return chart;
+	};
+	chart.isWorldMap = true;
+
+	return chart;
 }
 
 function AreaChart(dualYaxis) {
@@ -62,64 +902,57 @@ function AreaChart(dualYaxis) {
 			return d[2];
 		};
 
-	var xScale = d3.scale.ordinal();
-	var yScale0 = d3.scale.linear().nice();
-	var yScale1 = d3.scale.linear().nice();
+	var xScale = d3.scaleBand();
+	var yScale0 = d3.scaleLinear().nice();
+	var yScale1 = d3.scaleLinear().nice();
 
-	var xAxis = d3.svg.axis()
-		.scale(xScale)
-		.orient('bottom')
-		.tickFormat(function (d) {
+	var xAxis = d3.axisBottom(xScale)
+		.tickFormat(function(d) {
 			if (format.x)
 				return GoAccess.Util.fmtValue(d, format.x);
 			return d;
 		});
 
-	var yAxis0 = d3.svg.axis()
-		.scale(yScale0)
-		.orient('left')
-		.tickFormat(function (d) {
+	var yAxis0 = d3.axisLeft(yScale0)
+		.tickFormat(function(d) {
 			return d3.format('.2s')(d);
 		});
 
-	var yAxis1 = d3.svg.axis()
-		.scale(yScale1)
-		.orient('right')
-		.tickFormat(function (d) {
+	var yAxis1 = d3.axisRight(yScale1)
+		.tickFormat(function(d) {
 			if (format.y1)
 				return GoAccess.Util.fmtValue(d, format.y1);
 			return d3.format('.2s')(d);
 		});
 
-	var xGrid = d3.svg.axis()
-		.scale(xScale)
-		.orient('bottom');
+	var xGrid = d3.axisBottom(xScale);
+	var yGrid = d3.axisLeft(yScale0);
 
-	var yGrid = d3.svg.axis()
-		.scale(yScale0)
-		.orient('left');
+	var area0 = d3.area()
+		.curve(d3.curveMonotoneX)
+		.x(X)
+		.y0(height)
+		.y1(Y0);
 
-	var area0 = d3.svg.area()
-		.interpolate('cardinal')
+	var area1 = d3.area()
+		.curve(d3.curveMonotoneX)
+		.x(X)
+		.y0(Y1)
+		.y1(height);
+
+	var line0 = d3.line()
+		.curve(d3.curveMonotoneX)
 		.x(X)
 		.y(Y0);
-	var area1 = d3.svg.area()
-		.interpolate('cardinal')
+
+	var line1 = d3.line()
+		.curve(d3.curveMonotoneX)
 		.x(X)
 		.y(Y1);
 
-	var line0 = d3.svg.line()
-		.interpolate('cardinal')
-		.x(X)
-		.y(Y0);
-	var line1 = d3.svg.line()
-		.interpolate('cardinal')
-		.x(X)
-		.y(Y1);
-
-	// The x-accessor for the path generator; xScale ∘ xValue.
+	// The x-accessor for the path generator; xScale xValue.
 	function X(d) {
-		return xScale(d[0]);
+		return (xScale(d[0]) + xScale.bandwidth() / 2);
 	}
 
 	// The x-accessor for the path generator; yScale0 yValue0.
@@ -141,11 +974,15 @@ function AreaChart(dualYaxis) {
 	}
 
 	function getXTicks(data) {
+		const domain = xScale.domain();
 		if (data.length < nTicks)
-			return xScale.domain();
+			return domain;
 
-		return d3.range(0, data.length, Math.ceil(data.length / nTicks)).map(function (d) {
-			return xScale.domain()[d];
+		return d3.range(0, nTicks).map(function(i) {
+			const index = Math.floor(i * (domain.length - 1) / (nTicks - 1));
+			if (index >= 0 && index < domain.length)
+				return domain[index];
+			return null;
 		});
 	}
 
@@ -172,7 +1009,7 @@ function AreaChart(dualYaxis) {
 		xScale.domain(data.map(function (d) {
 			return d[0];
 		}))
-		.rangePoints([0, innerW()], 1);
+		.range([0, innerW()]);
 
 		// Update the y-scale.
 		yScale0.domain([0, d3.max(data, function (d) {
@@ -194,24 +1031,38 @@ function AreaChart(dualYaxis) {
 	function setLegendLabels(svg) {
 		// Legend Color
 		var rect = svg.selectAll('rect.legend.y0').data([null]);
-		rect.enter().append('rect')
+
+		var rectEnter = rect.enter()
+			.append('rect')
 			.attr('class', 'legend y0')
 			.attr('data-yaxis', 'y0')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 15));
-		rect
+
+		rectEnter.merge(rect)
 			.attr('x', (width / 2) - 100);
 
 		// Legend Labels
 		var text = svg.selectAll('text.legend.y0').data([null]);
-		text.enter().append('text')
+
+		var textEnter = text.enter()
+			.append('text')
 			.attr('class', 'legend y0')
 			.attr('data-yaxis', 'y0')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 6));
-		text
+
+		textEnter.merge(text)
 			.attr('x', (width / 2) - 85)
 			.text(labels.y0);
 
@@ -220,95 +1071,111 @@ function AreaChart(dualYaxis) {
 
 		// Legend Labels
 		rect = svg.selectAll('rect.legend.y1').data([null]);
-		rect.enter().append('rect')
+
+		var rectEnter = rect.enter()
+			.append('rect')
 			.attr('class', 'legend y1')
 			.attr('data-yaxis', 'y1')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 15));
-		rect
+
+		rectEnter.merge(rect)
 			.attr('x', (width / 2));
 
 		// Legend Labels
 		text = svg.selectAll('text.legend.y1').data([null]);
-		text.enter().append('text')
+
+		var textEnter = text.enter()
+			.append('text')
 			.attr('class', 'legend y1')
 			.attr('data-yaxis', 'y1')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 6));
-		text
+
+		textEnter.merge(text)
 			.attr('x', (width / 2) + 15)
 			.text(labels.y1);
 	}
 
 	function setAxisLabels(svg) {
 		// Labels
-		svg.selectAll('text.axis-label.y0').data([null])
-			.enter().append('text')
+		svg.selectAll('text.axis-label.y0')
+			.data([null])
+			.enter()
+			.append('text')
 			.attr('class', 'axis-label y0')
 			.attr('y', 10)
 			.attr('x', 53)
 			.text(labels.y0);
 
-		if (!dualYaxis)
-			return;
+		if (!dualYaxis) return;
 
 		// Labels
-		var tEnter = svg.selectAll('text.axis-label.y1').data([null]);
-		tEnter.enter().append('text')
+		var tEnter = svg.selectAll('text.axis-label.y1')
+			.data([null])
+			.enter()
+			.append('text')
 			.attr('class', 'axis-label y1')
 			.attr('y', 10)
 			.text(labels.y1);
-		dualYaxis && tEnter
-			.attr('x', width - 25);
+
+		dualYaxis && tEnter.attr('x', width - 25);
 	}
 
 	function createSkeleton(svg) {
-		// Otherwise, create the skeletal chart.
-		var gEnter = svg.enter().append('svg').append('g');
+		const g = svg.append('g');
 
 		// Lines
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'line line0 y0');
-		dualYaxis && gEnter.append('g')
+		dualYaxis && g.append('g')
 			.attr('class', 'line line1 y1');
 
 		// Areas
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'area area0 y0');
-		dualYaxis && gEnter.append('g')
+		dualYaxis && g.append('g')
 			.attr('class', 'area area1 y1');
 
 		// Points
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'points y0');
-		dualYaxis && gEnter.append('g')
+		dualYaxis && g.append('g')
 			.attr('class', 'points y1');
 
 		// Grid
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'x grid');
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'y grid');
 
 		// Axis
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'x axis');
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'y0 axis');
-		dualYaxis && gEnter.append('g')
+		dualYaxis && g.append('g')
 			.attr('class', 'y1 axis');
 
 		// Rects
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'rects');
 
 		setAxisLabels(svg);
 		setLegendLabels(svg);
 
 		// Mouseover line
-		gEnter.append('line')
+		g.append('line')
 			.attr('y2', innerH())
 			.attr('y1', 0)
 			.attr('class', 'indicator');
@@ -320,45 +1187,49 @@ function AreaChart(dualYaxis) {
 
 	function addLine(g, data, line, cName) {
 		// Update the line path.
-		var path = g.select('g.' + cName).selectAll('path.' + cName)
-			.data([data]);
+		var path = g.select('g.' + cName).selectAll('path.' + cName).data([data]);
+
 		// enter
-		path
-			.enter()
+		var pathEnter = path.enter()
 			.append('svg:path')
 			.attr('d', line)
 			.attr('class', cName)
-			.attr('stroke-dasharray', function (d) {
+			.attr('stroke-dasharray', function(d) {
 				var pl = pathLen(d3.select(this));
 				return pl + ' ' + pl;
 			})
-			.attr('stroke-dashoffset', function (d) {
+			.attr('stroke-dashoffset', function(d) {
 				return pathLen(d3.select(this));
 			});
+
 		// update
-		path
+		pathEnter.merge(path)
 			.attr('d', line)
 			.transition()
-			.attr('stroke-dasharray', function (d) {
-				var pl = pathLen(d3.select(this));
+			.attr('stroke-dasharray', function(d) {
+			var pl = pathLen(d3.select(this));
 				return pl + ' ' + pl;
 			})
 			.duration(2000)
 			.attr('stroke-dashoffset', 0);
+
 		// remove elements
 		path.exit().remove();
+
 	}
 
 	function addArea(g, data, cb, cName) {
 		// Update the area path.
 		var area = g.select('g.' + cName).selectAll('path.' + cName)
 			.data([data]);
-		area
-			.enter()
+
+		var areaEnter = area.enter()
 			.append('svg:path')
 			.attr('class', cName);
-		area
+
+		areaEnter.merge(area)
 			.attr('d', cb);
+
 		// remove elements
 		area.exit().remove();
 	}
@@ -379,32 +1250,42 @@ function AreaChart(dualYaxis) {
 	function addPoints(g, data) {
 		var radius = data.length > 100 ? 1 : 2.5;
 
-		var points = g.select('g.points.y0').selectAll('circle.point')
-			.data(data);
-		points
-			.enter()
+		var points = g.select('g.points.y0').selectAll('circle.point').data(data);
+
+		var pointsEnter = points.enter()
 			.append('svg:circle')
 			.attr('r', radius)
 			.attr('class', 'point');
-		points
-			.attr('cx', function (d) { return xScale(d[0]); })
-			.attr('cy', function (d) { return yScale0(d[1]); });
+
+		pointsEnter.merge(points)
+			.attr('cx', function(d) {
+				return (xScale(d[0]) + xScale.bandwidth() / 2);
+			})
+			.attr('cy', function(d) {
+				return yScale0(d[1]);
+			});
+
 		// remove elements
 		points.exit().remove();
 
 		if (!dualYaxis)
 			return;
 
-		points = g.select('g.points.y1').selectAll('circle.point')
-			.data(data);
-		points
-			.enter()
+		points = g.select('g.points.y1').selectAll('circle.point').data(data);
+
+		pointsEnter = points.enter()
 			.append('svg:circle')
 			.attr('r', radius)
 			.attr('class', 'point');
-		points
-			.attr('cx', function (d) { return xScale(d[0]); })
-			.attr('cy', function (d) { return yScale1(d[2]); });
+
+		pointsEnter.merge(points)
+			.attr('cx', function(d) {
+				return (xScale(d[0]) + xScale.bandwidth() / 2);
+			})
+			.attr('cy', function(d) {
+				return yScale1(d[2]);
+			});
+
 		// remove elements
 		points.exit().remove();
 	}
@@ -441,18 +1322,20 @@ function AreaChart(dualYaxis) {
 			.call(xGrid
 				.tickValues(getXTicks(data))
 				.tickSize(-innerH(), 0, 0)
+				.tickSizeOuter(0)
 				.tickFormat('')
 			);
 
 		g.select('.y.grid')
 			.call(yGrid
 				.tickValues(getYTicks(yScale0))
-				.tickSize(-innerW(), 0, 0)
+				.tickSize(-innerW(), 0)
+				.tickSizeOuter(0)
 				.tickFormat('')
 			);
 	}
 
-	function formatTooltip(data, i) {
+	function formatTooltip(data) {
 		var d = data.slice(0);
 
 		d[0] = (format.x) ? GoAccess.Util.fmtValue(d[0], format.x) : d[0];
@@ -465,16 +1348,16 @@ function AreaChart(dualYaxis) {
 		});
 	}
 
-	function mouseover(_self, selection, data, idx) {
+	function mouseover(event, selection, data) {
 		var tooltip = selection.select('.chart-tooltip-wrap');
-		tooltip.html(formatTooltip(data, idx))
-			.style('left', (xScale(data[0])) + 'px')
-			.style('top',  (d3.mouse(_self)[1] + 10) + 'px')
+		tooltip.html(formatTooltip(data))
+			.style('left', X(data) + 'px')
+			.style('top',  (d3.pointer(event)[1] + 10) + 'px')
 			.style('display', 'block');
 
 		selection.select('line.indicator')
 			.style('display', 'block')
-			.attr('transform', 'translate(' + xScale(data[0]) + ',' + 0 + ')');
+			.attr('transform', 'translate(' + X(data) + ',' + 0 + ')');
 	}
 
 	function mouseout(selection, g) {
@@ -487,23 +1370,26 @@ function AreaChart(dualYaxis) {
 	function addRects(selection, g, data) {
 		var w = (innerW() / data.length);
 
-		var rects = g.select('g.rects').selectAll('rect')
-			.data(data);
-		rects
-			.enter()
+		var rects = g.select('g.rects').selectAll('rect').data(data);
+
+		var rectsEnter = rects.enter()
 			.append('svg:rect')
 			.attr('height', innerH())
 			.attr('class', 'point');
-		rects
-			.attr('width', d3.functor(w))
-			.attr('x', function (d, i) { return (w * i); })
-			.attr('y', 0)
-			.on('mousemove', function (d, i) {
-				mouseover(this, selection, d, i);
+
+		rectsEnter.merge(rects)
+			.attr('width', w)
+			.attr('x', function(d, i) {
+				return (w * i);
 			})
-			.on('mouseleave', function (d, i) {
+			.attr('y', 0)
+			.on('mousemove', function(event) {
+				mouseover(event, selection, d3.select(this).datum());
+			})
+			.on('mouseleave', function(event) {
 				mouseout(selection, g);
 			});
+
 		// remove elements
 		rects.exit().remove();
 	}
@@ -515,15 +1401,14 @@ function AreaChart(dualYaxis) {
 			// updates X-Y scales
 			updateScales(data);
 
-			// Select the svg element, if it exists.
-			var svg = d3.select(this).selectAll('svg').data([data]);
-			createSkeleton(svg);
+			// select the SVG element, if it exists
+			let svg = d3.select(this).select('svg');
 
-			// Update the outer dimensions.
-			svg.attr({
-				'width': width,
-				'height': height
-			});
+			// if the SVG element doesn't exist, create it
+			if (svg.empty()) {
+				svg = d3.select(this).append('svg').attr('width', width).attr('height', height);
+				createSkeleton(svg);
+			}
 
 			// Update the inner dimensions.
 			var g = svg.select('g')
@@ -624,42 +1509,33 @@ function BarChart(dualYaxis) {
 			return d[2];
 		};
 
-	var xScale = d3.scale.ordinal();
-	var yScale0 = d3.scale.linear().nice();
-	var yScale1 = d3.scale.linear().nice();
+	var xScale = d3.scaleBand()
+		.paddingInner(0.1)
+		.paddingOuter(0.1);
+	var yScale0 = d3.scaleLinear().nice();
+	var yScale1 = d3.scaleLinear().nice();
 
-	var xAxis = d3.svg.axis()
-		.scale(xScale)
-		.orient('bottom')
+	var xAxis = d3.axisBottom(xScale)
 		.tickFormat(function (d) {
 			if (format.x)
 				return GoAccess.Util.fmtValue(d, format.x);
 			return d;
 		});
 
-	var yAxis0 = d3.svg.axis()
-		.scale(yScale0)
-		.orient('left')
+	var yAxis0 = d3.axisLeft(yScale0)
 		.tickFormat(function (d) {
 			return d3.format('.2s')(d);
 		});
 
-	var yAxis1 = d3.svg.axis()
-		.scale(yScale1)
-		.orient('right')
+	var yAxis1 = d3.axisRight(yScale1)
 		.tickFormat(function (d) {
 			if (format.y1)
 				return GoAccess.Util.fmtValue(d, format.y1);
 			return d3.format('.2s')(d);
 		});
 
-	var xGrid = d3.svg.axis()
-		.scale(xScale)
-		.orient('bottom');
-
-	var yGrid = d3.svg.axis()
-		.scale(yScale0)
-		.orient('left');
+	var xGrid = d3.axisBottom(xScale);
+	var yGrid = d3.axisLeft(yScale0);
 
 	function innerW() {
 		return width - margin.left - margin.right;
@@ -670,17 +1546,26 @@ function BarChart(dualYaxis) {
 	}
 
 	function getXTicks(data) {
+		const domain = xScale.domain();
 		if (data.length < nTicks)
-			return xScale.domain();
+			return domain;
 
-		return d3.range(0, data.length, Math.ceil(data.length / nTicks)).map(function (d) {
-			return xScale.domain()[d];
+		return d3.range(0, nTicks).map(function(i) {
+			const index = Math.floor(i * (domain.length - 1) / (nTicks - 1));
+			if (index >= 0 && index < domain.length)
+				return domain[index];
+			return null;
 		});
 	}
 
 	function getYTicks(scale) {
 		var domain = scale.domain();
 		return d3.range(domain[0], domain[1], Math.ceil(domain[1] / nTicks));
+	}
+
+	// The x-accessor for the path generator; xScale - xValue.
+	function X(d) {
+		return (xScale(d[0]) + xScale.bandwidth() / 2);
 	}
 
 	// Convert data to standard representation greedily;
@@ -701,7 +1586,7 @@ function BarChart(dualYaxis) {
 		xScale.domain(data.map(function (d) {
 			return d[0];
 		}))
-		.rangeBands([0, innerW()], 0.1);
+		.range([0, innerW()]);
 
 		// Update the y-scale.
 		yScale0.domain([0, d3.max(data, function (d) {
@@ -710,9 +1595,12 @@ function BarChart(dualYaxis) {
 		.range([innerH(), 0]);
 
 		// Update the y-scale.
+		// If all values are [0, 0]. This can cause issues when drawing the
+		// chart because all values passed to the scale will be mapped to the
+		// same value in the range, thus + 0.1 e.g., Not Found visitors.
 		dualYaxis && yScale1.domain([0, d3.max(data, function (d) {
 			return d[2];
-		})])
+		}) + 0.1])
 		.range([innerH(), 0]);
 	}
 
@@ -723,24 +1611,38 @@ function BarChart(dualYaxis) {
 	function setLegendLabels(svg) {
 		// Legend Color
 		var rect = svg.selectAll('rect.legend.y0').data([null]);
-		rect.enter().append('rect')
+
+		var rectEnter = rect.enter()
+			.append('rect')
 			.attr('class', 'legend y0')
 			.attr('data-yaxis', 'y0')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 15));
-		rect
+
+		rectEnter.merge(rect)
 			.attr('x', (width / 2) - 100);
 
 		// Legend Labels
 		var text = svg.selectAll('text.legend.y0').data([null]);
-		text.enter().append('text')
+
+		var textEnter = text.enter()
+			.append('text')
 			.attr('class', 'legend y0')
 			.attr('data-yaxis', 'y0')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 6));
-		text
+
+		textEnter.merge(text)
 			.attr('x', (width / 2) - 85)
 			.text(labels.y0);
 
@@ -749,83 +1651,99 @@ function BarChart(dualYaxis) {
 
 		// Legend Labels
 		rect = svg.selectAll('rect.legend.y1').data([null]);
-		rect.enter().append('rect')
+
+		var rectEnter = rect.enter()
+			.append('rect')
 			.attr('class', 'legend y1')
 			.attr('data-yaxis', 'y1')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 15));
-		rect
+
+		rectEnter.merge(rect)
 			.attr('x', (width / 2));
 
 		// Legend Labels
 		text = svg.selectAll('text.legend.y1').data([null]);
-		text.enter().append('text')
+
+		var textEnter = text.enter()
+			.append('text')
 			.attr('class', 'legend y1')
 			.attr('data-yaxis', 'y1')
-			.on('mousemove', function (d, i) { toggleOpacity(this, 'opacity:0.1'); })
-			.on('mouseleave', function (d, i) { toggleOpacity(this, null); })
+			.on('mousemove', function(d, i) {
+				toggleOpacity(this, 'opacity:0.1');
+			})
+			.on('mouseleave', function(d, i) {
+				toggleOpacity(this, null);
+			})
 			.attr('y', (height - 6));
-		text
+
+		textEnter.merge(text)
 			.attr('x', (width / 2) + 15)
 			.text(labels.y1);
 	}
 
 	function setAxisLabels(svg) {
 		// Labels
-		svg.selectAll('text.axis-label.y0').data([null])
-			.enter().append('text')
+		svg.selectAll('text.axis-label.y0')
+			.data([null])
+			.enter()
+			.append('text')
 			.attr('class', 'axis-label y0')
 			.attr('y', 10)
 			.attr('x', 53)
 			.text(labels.y0);
 
-		if (!dualYaxis)
-			return;
+		if (!dualYaxis) return;
 
 		// Labels
-		var tEnter = svg.selectAll('text.axis-label.y1').data([null]);
-		tEnter.enter().append('text')
+		var tEnter = svg.selectAll('text.axis-label.y1')
+			.data([null])
+			.enter()
+			.append('text')
 			.attr('class', 'axis-label y1')
 			.attr('y', 10)
 			.text(labels.y1);
-		dualYaxis && tEnter
-			.attr('x', width - 25);
+
+		dualYaxis && tEnter.attr('x', width - 25);
 	}
 
 	function createSkeleton(svg) {
-		// Otherwise, create the skeletal chart.
-		var gEnter = svg.enter().append('svg').append('g');
+		const g = svg.append('g');
 
 		// Grid
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'x grid');
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'y grid');
 
 		// Axis
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'x axis');
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'y0 axis');
-		dualYaxis && gEnter.append('g')
+		dualYaxis && g.append('g')
 			.attr('class', 'y1 axis');
 
 		// Bars
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'bars y0');
-		dualYaxis && gEnter.append('g')
+		dualYaxis && g.append('g')
 			.attr('class', 'bars y1');
 
 		// Rects
-		gEnter.append('g')
+		g.append('g')
 			.attr('class', 'rects');
 
 		setAxisLabels(svg);
 		setLegendLabels(svg);
 
 		// Mouseover line
-		gEnter.append('line')
+		g.append('line')
 			.attr('y2', innerH())
 			.attr('y1', 0)
 			.attr('class', 'indicator');
@@ -833,20 +1751,20 @@ function BarChart(dualYaxis) {
 
 	// Update the area path and lines.
 	function addBars(g, data) {
-		var bars = g.select('g.bars.y0').selectAll('rect.bar')
-			.data(data);
+		var bars = g.select('g.bars.y0').selectAll('rect.bar').data(data);
+
 		// enter
-		bars
-			.enter()
+		var enter = bars.enter()
 			.append('svg:rect')
 			.attr('class', 'bar')
 			.attr('height', 0)
-			.attr('width', function (d, i) { return xScale.rangeBand() / 2; })
+			.attr('width', function (d, i) { return xScale.bandwidth() / 2; })
 			.attr('x', function (d, i) { return xScale(d[0]); })
 			.attr('y', function (d, i) { return innerH(); });
+
 		// update
-		bars
-			.attr('width', xScale.rangeBand() / 2)
+		bars.merge(enter)
+			.attr('width', xScale.bandwidth() / 2)
 			.attr('x', function (d) { return xScale(d[0]); })
 			.transition()
 			.delay(function (d, i) { return i / data.length * 1000; })
@@ -859,21 +1777,19 @@ function BarChart(dualYaxis) {
 		if (!dualYaxis)
 			return;
 
-		bars = g.select('g.bars.y1').selectAll('rect.bar')
-			.data(data);
+		bars = g.select('g.bars.y1').selectAll('rect.bar').data(data);
 		// enter
-		bars
-			.enter()
+		enter = bars.enter()
 			.append('svg:rect')
 			.attr('class', 'bar')
 			.attr('height', 0)
-			.attr('width', function (d, i) { return xScale.rangeBand() / 2; })
-			.attr('x', function (d) { return (xScale(d[0]) + xScale.rangeBand() / 2); })
+			.attr('width', function (d, i) { return xScale.bandwidth() / 2; })
+			.attr('x', function (d) { return (xScale(d[0]) + xScale.bandwidth() / 2); })
 			.attr('y', function (d, i) { return innerH(); });
 		// update
-		bars
-			.attr('width', xScale.rangeBand() / 2)
-			.attr('x', function (d) { return (xScale(d[0]) + xScale.rangeBand() / 2); })
+		bars.merge(enter)
+			.attr('width', xScale.bandwidth() / 2)
+			.attr('x', function (d) { return (xScale(d[0]) + xScale.bandwidth() / 2); })
 			.transition()
 			.delay(function (d, i) { return i / data.length * 1000; })
 			.duration(500)
@@ -915,18 +1831,20 @@ function BarChart(dualYaxis) {
 			.call(xGrid
 				.tickValues(getXTicks(data))
 				.tickSize(-innerH(), 0, 0)
+				.tickSizeOuter(0)
 				.tickFormat('')
 			);
 
 		g.select('.y.grid')
 			.call(yGrid
 				.tickValues(getYTicks(yScale0))
-				.tickSize(-innerW(), 0, 0)
+				.tickSize(-innerW(), 0)
+				.tickSizeOuter(0)
 				.tickFormat('')
 			);
 	}
 
-	function formatTooltip(data, i) {
+	function formatTooltip(data) {
 		var d = data.slice(0);
 
 		d[0] = (format.x) ? GoAccess.Util.fmtValue(d[0], format.x) : d[0];
@@ -939,17 +1857,16 @@ function BarChart(dualYaxis) {
 		});
 	}
 
-	function mouseover(_self, selection, data, idx) {
-		var left = xScale(data[0]) + (xScale.rangeBand() / 2);
+	function mouseover(event, selection, data) {
 		var tooltip = selection.select('.chart-tooltip-wrap');
-		tooltip.html(formatTooltip(data, idx))
-			.style('left', left + 'px')
-			.style('top',  (d3.mouse(_self)[1] + 10) + 'px')
+		tooltip.html(formatTooltip(data))
+			.style('left', X(data) + 'px')
+			.style('top',  (d3.pointer(event)[1] + 10) + 'px')
 			.style('display', 'block');
 
 		selection.select('line.indicator')
 			.style('display', 'block')
-			.attr('transform', 'translate(' + left + ',' + 0 + ')');
+			.attr('transform', 'translate(' + X(data) + ',' + 0 + ')');
 	}
 
 	function mouseout(selection, g) {
@@ -962,23 +1879,26 @@ function BarChart(dualYaxis) {
 	function addRects(selection, g, data) {
 		var w = (innerW() / data.length);
 
-		var rects = g.select('g.rects').selectAll('rect')
-			.data(data);
-		rects
-			.enter()
+		var rects = g.select('g.rects').selectAll('rect').data(data);
+
+		var rectsEnter = rects.enter()
 			.append('svg:rect')
 			.attr('height', innerH())
 			.attr('class', 'point');
-		rects
-			.attr('width', d3.functor(w))
-			.attr('x', function (d, i) { return (w * i); })
-			.attr('y', 0)
-			.on('mousemove', function (d, i) {
-				mouseover(this, selection, d, i);
+
+		rectsEnter.merge(rects)
+			.attr('width', w)
+			.attr('x', function(d, i) {
+				return (w * i);
 			})
-			.on('mouseleave', function (d, i) {
+			.attr('y', 0)
+			.on('mousemove', function(event) {
+				mouseover(event, selection, d3.select(this).datum());
+			})
+			.on('mouseleave', function(event) {
 				mouseout(selection, g);
 			});
+
 		// remove elements
 		rects.exit().remove();
 	}
@@ -990,15 +1910,14 @@ function BarChart(dualYaxis) {
 			// updates X-Y scales
 			updateScales(data);
 
-			// Select the svg element, if it exists.
-			var svg = d3.select(this).selectAll('svg').data([data]);
-			createSkeleton(svg);
+			// select the SVG element, if it exists
+			let svg = d3.select(this).select('svg');
 
-			// Update the outer dimensions.
-			svg.attr({
-				'width': width,
-				'height': height
-			});
+			// if the SVG element doesn't exist, create it
+			if (svg.empty()) {
+				svg = d3.select(this).append('svg').attr('width', width).attr('height', height);
+				createSkeleton(svg);
+			}
 
 			// Update the inner dimensions.
 			var g = svg.select('g')

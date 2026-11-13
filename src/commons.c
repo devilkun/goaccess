@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -36,11 +36,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "commons.h"
 
-#include "error.h"
 #include "labels.h"
 #include "settings.h"
 #include "util.h"
@@ -56,7 +54,7 @@ int module_list[TOTAL_MODULES] = {[0 ... TOTAL_MODULES - 1] = -1 };
 
 /* *INDENT-OFF* */
 /* String modules to enumerated modules */
-static GEnum enum_modules[] = {
+static const GEnum enum_modules[] = {
   {"VISITORS"        , VISITORS}        ,
   {"REQUESTS"        , REQUESTS}        ,
   {"REQUESTS_STATIC" , REQUESTS_STATIC} ,
@@ -68,36 +66,40 @@ static GEnum enum_modules[] = {
   {"VIRTUAL_HOSTS"   , VIRTUAL_HOSTS}   ,
   {"REFERRERS"       , REFERRERS}       ,
   {"REFERRING_SITES" , REFERRING_SITES} ,
-  {"KEYPHRASES"      , KEYPHRASES}      ,
   {"STATUS_CODES"    , STATUS_CODES}    ,
   {"REMOTE_USER"     , REMOTE_USER}     ,
   {"CACHE_STATUS"    , CACHE_STATUS}    ,
 #ifdef HAVE_GEOLOCATION
   {"GEO_LOCATION"    , GEO_LOCATION}    ,
+  {"ASN"             , ASN}             ,
 #endif
   {"MIME_TYPE"       , MIME_TYPE}       ,
   {"TLS_TYPE"        , TLS_TYPE}        ,
+  {"UTM_CAMPAIGNS"   , UTM_CAMPAIGNS}   ,
 };
 /* *INDENT-ON* */
 
-/* Get number of items per panel to parse.
+/* Get number of items per panel/level to parse.
  *
- * The number of items per panel is returned. */
-int
-get_max_choices (void) {
+ * If is_sub is true, returns sub-item limits, otherwise returns panel limits.
+ * The number of items per panel/level is returned. */
+static uint32_t
+get_max_choices_internal (int is_sub) {
   char *csv = NULL, *json = NULL, *html = NULL;
   int max = MAX_CHOICES;
+  int rt_default = is_sub ? MAX_CHOICES_SUB_RT : MAX_CHOICES_RT;
 
   /* no max choices, return defaults */
   if (conf.max_items <= 0)
-    return conf.real_time_html ? MAX_CHOICES_RT : MAX_CHOICES;
+    return conf.real_time_html ? rt_default : (conf.date_spec_hr ==
+                                               2 ? MAX_CHOICES_MINUTE : MAX_CHOICES);
 
   /* TERM */
   if (!conf.output_stdout)
     return conf.max_items > MAX_CHOICES ? MAX_CHOICES : conf.max_items;
 
   /* REAL-TIME STDOUT */
-  /* real time HTML, display max rt choices */
+  /* real time HTML, display max rt choices - always cap at MAX_CHOICES_RT */
   if (conf.real_time_html)
     return conf.max_items > MAX_CHOICES_RT ? MAX_CHOICES_RT : conf.max_items;
 
@@ -119,6 +121,18 @@ get_max_choices (void) {
   free (json);
 
   return max;
+}
+
+/* Get number of items per panel to parse. */
+uint32_t
+get_max_choices (void) {
+  return get_max_choices_internal (0);
+}
+
+/* Get number of sub-items per hierarchy level to parse. */
+uint32_t
+get_max_choices_sub (void) {
+  return get_max_choices_internal (1);
 }
 
 /* Calculate a percentage.
@@ -149,31 +163,28 @@ display_default_config_file (void) {
   }
 }
 
+/* Display the arguments given to configure at build time. */
+static void
+display_configure_args (void) {
+  fprintf (stdout, "\nBuild configure arguments:\n");
+
+  /* configure run with no arguments still yields a valid, fully default build */
+  if (GO_CONFIGURE_ARGS[0] == '\0') {
+    fprintf (stdout, "  (none)\n");
+    return;
+  }
+
+  fprintf (stdout, "  %s\n", GO_CONFIGURE_ARGS);
+}
+
 /* Display the current version. */
 void
 display_version (void) {
   fprintf (stdout, "GoAccess - %s.\n", GO_VERSION);
   fprintf (stdout, "%s: %s\n", INFO_MORE_INFO, GO_WEBSITE);
-  fprintf (stdout, "Copyright (C) 2009-2020 by Gerardo Orellana\n");
-  fprintf (stdout, "\nBuild configure arguments:\n");
-#ifdef DEBUG
-  fprintf (stdout, "  --enable-debug\n");
-#endif
-#ifdef HAVE_NCURSESW_NCURSES_H
-  fprintf (stdout, "  --enable-utf8\n");
-#endif
-#ifdef HAVE_LIBGEOIP
-  fprintf (stdout, "  --enable-geoip=legacy\n");
-#endif
-#ifdef HAVE_LIBMAXMINDDB
-  fprintf (stdout, "  --enable-geoip=mmdb\n");
-#endif
-#ifdef WITH_GETLINE
-  fprintf (stdout, "  --with-getline\n");
-#endif
-#ifdef HAVE_LIBSSL
-  fprintf (stdout, "  --with-openssl\n");
-#endif
+  fprintf (stdout, "Copyright (C) 2009-2026 by Gerardo Orellana\n");
+
+  display_configure_args ();
 }
 
 /* Get the enumerated value given a string.
@@ -196,13 +207,13 @@ str2enum (const GEnum map[], int len, const char *str) {
  *
  * On error, -1 is returned.
  * On success, the enumerated module value is returned. */
-char *
+const char *
 enum2str (const GEnum map[], int len, int idx) {
   int i;
 
   for (i = 0; i < len; ++i) {
     if (idx == map[i].idx)
-      return xstrdup (map[i].str);
+      return map[i].str;
   }
 
   return NULL;
@@ -221,7 +232,7 @@ get_module_enum (const char *str) {
  *
  * On error, NULL is returned.
  * On success, the string module value is returned. */
-char *
+const char *
 get_module_str (GModule module) {
   return enum2str (enum_modules, ARRAY_SIZE (enum_modules), module);
 }
@@ -243,7 +254,7 @@ new_gagents (uint32_t size) {
 
 /* Clean the array of agents. */
 void
-free_agents_array (GAgents * agents) {
+free_agents_array (GAgents *agents) {
   int i;
 
   if (agents == NULL)
@@ -400,7 +411,7 @@ verify_panels (void) {
   if (!conf.log_format)
     return;
 
-  if (!strstr (conf.log_format, "%v") && ignore_panel_idx < TOTAL_MODULES) {
+  if (!strstr (conf.log_format, "%v") && ignore_panel_idx < TOTAL_MODULES && !conf.fname_as_vhost) {
     if (str_inarray ("VIRTUAL_HOSTS", conf.ignore_panels, ignore_panel_idx) < 0)
       remove_module (VIRTUAL_HOSTS);
   }
@@ -422,9 +433,14 @@ verify_panels (void) {
   }
 #ifdef HAVE_GEOLOCATION
 #ifdef HAVE_LIBMAXMINDDB
-  if (!conf.geoip_database && ignore_panel_idx < TOTAL_MODULES) {
+  /* Restores defer GEO/ASN visibility until their retained rows are loaded. */
+  if (!conf.geoip_db_idx && !conf.restore && ignore_panel_idx < TOTAL_MODULES) {
     if (str_inarray ("GEO_LOCATION", conf.ignore_panels, ignore_panel_idx) < 0)
       remove_module (GEO_LOCATION);
+  }
+  if (!conf.geoip_db_idx && !conf.restore && ignore_panel_idx < TOTAL_MODULES) {
+    if (str_inarray ("ASN", conf.ignore_panels, ignore_panel_idx) < 0)
+      remove_module (ASN);
   }
 #endif
 #endif

@@ -6,7 +6,7 @@
  * \____/  |__/|__//____/\____/\___/_/|_|\___/\__/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -54,16 +54,19 @@ typedef struct GWSWriter_ {
   pthread_t thread;             /* Thread fifo out */
 
   WSServer *server;             /* WebSocket server */
+
+  char *snapshot;               /* last report broadcast, replayed to new clients */
+  int snapshot_len;             /* length of the last report broadcast */
 } GWSWriter;
 
 GWSReader *new_gwsreader (void);
 GWSWriter *new_gwswriter (void);
-int broadcast_holder (int fd, const char *buf, int len);
 int open_fifoin (void);
 int open_fifoout (void);
 int read_fifo (GWSReader * gwsreader, void (*f) (int));
-int send_holder_to_client (int fd, int listener, const char *buf, int len);
 int setup_ws_server (GWSWriter * gwswriter, GWSReader * gwsreader);
+void publish_snapshot (GWSWriter * gwswriter, char *json);
+void replay_snapshot (GWSWriter * gwswriter, int listener);
 void set_ready_state (void);
 void set_self_pipe (int *self_pipe);
 void stop_ws_server (GWSWriter * gwswriter, GWSReader * gwsreader);

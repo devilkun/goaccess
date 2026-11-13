@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -41,11 +41,14 @@
 #include "error.h"
 #include "gdns.h"
 #include "gkhash.h"
+#include "gstorage.h"
+#include "ui.h"
 #include "util.h"
 #include "xmalloc.h"
 
 #ifdef HAVE_GEOLOCATION
 #include "geoip1.h"
+#include "geolocation.h"
 #endif
 
 typedef struct GPanel_ {
@@ -57,40 +60,53 @@ typedef struct GPanel_ {
 
 /* *INDENT-OFF* */
 static void add_data_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel);
-static void add_host_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel);
 static void add_root_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel);
+static void add_tls_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel);
+static void add_utm_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel);
 static void add_host_child_to_holder (GHolder * h);
+#ifdef HAVE_GEOLOCATION
+static void add_geo_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel);
+#endif
 
-static GPanel paneling[] = {
+static const GPanel paneling[] = {
   {VISITORS        , add_data_to_holder , NULL},
   {REQUESTS        , add_data_to_holder , NULL},
   {REQUESTS_STATIC , add_data_to_holder , NULL},
   {NOT_FOUND       , add_data_to_holder , NULL},
-  {HOSTS           , add_host_to_holder , add_host_child_to_holder} ,
+  {HOSTS           , add_data_to_holder , add_host_child_to_holder} ,
   {OS              , add_root_to_holder , NULL},
   {BROWSERS        , add_root_to_holder , NULL},
   {VISIT_TIMES     , add_data_to_holder , NULL},
   {VIRTUAL_HOSTS   , add_data_to_holder , NULL},
   {REFERRERS       , add_data_to_holder , NULL},
   {REFERRING_SITES , add_data_to_holder , NULL},
-  {KEYPHRASES      , add_data_to_holder , NULL},
   {STATUS_CODES    , add_root_to_holder , NULL},
   {REMOTE_USER     , add_data_to_holder , NULL},
   {CACHE_STATUS    , add_data_to_holder , NULL},
 #ifdef HAVE_GEOLOCATION
-  {GEO_LOCATION    , add_root_to_holder , NULL},
+  {GEO_LOCATION    , add_geo_to_holder  , NULL},
+  {ASN             , add_data_to_holder , NULL} ,
 #endif
-  {MIME_TYPE    , add_root_to_holder, NULL} ,
-  {TLS_TYPE    , add_root_to_holder, NULL} ,
+  {MIME_TYPE       , add_root_to_holder , NULL} ,
+  {TLS_TYPE        , add_tls_to_holder  , NULL} ,
+  {UTM_CAMPAIGNS   , add_utm_to_holder  , NULL} ,
 };
 /* *INDENT-ON* */
+
+static const char *const utm_missing_labels[UTM_PRIMARY_LEVEL_COUNT] = {
+  UTM_MEDIUM_NOT_SET,
+  UTM_SOURCE_NOT_SET,
+  UTM_CAMPAIGN_NOT_SET,
+  UTM_CONTENT_NOT_SET,
+  UTM_TERM_NOT_SET,
+};
 
 
 /* Get a panel from the GPanel structure given a module.
  *
  * On error, or if not found, NULL is returned.
  * On success, the panel value is returned. */
-static GPanel *
+static const GPanel *
 panel_lookup (GModule module) {
   int i, num_panels = ARRAY_SIZE (paneling);
 
@@ -139,11 +155,12 @@ new_gsublist (void) {
  *
  * On success, the newly allocated GSubItem is returned . */
 static GSubItem *
-new_gsubitem (GModule module, GMetrics * nmetrics) {
+new_gsubitem (GModule module, GMetrics *nmetrics) {
   GSubItem *sub_item = xmalloc (sizeof (GSubItem));
 
   sub_item->metrics = nmetrics;
   sub_item->module = module;
+  sub_item->sub_list = NULL;
   sub_item->prev = NULL;
   sub_item->next = NULL;
 
@@ -152,7 +169,7 @@ new_gsubitem (GModule module, GMetrics * nmetrics) {
 
 /* Add an item to the end of a given sub list. */
 static void
-add_sub_item_back (GSubList * sub_list, GModule module, GMetrics * nmetrics) {
+add_sub_item_back (GSubList *sub_list, GModule module, GMetrics *nmetrics) {
   GSubItem *sub_item = new_gsubitem (module, nmetrics);
   if (sub_list->tail) {
     sub_list->tail->next = sub_item;
@@ -167,7 +184,7 @@ add_sub_item_back (GSubList * sub_list, GModule module, GMetrics * nmetrics) {
 
 /* Delete the entire given sub list. */
 static void
-delete_sub_list (GSubList * sub_list) {
+delete_sub_list (GSubList *sub_list) {
   GSubItem *item = NULL;
   GSubItem *next = NULL;
 
@@ -176,6 +193,8 @@ delete_sub_list (GSubList * sub_list) {
 
   for (item = sub_list->head; item; item = next) {
     next = item->next;
+    if (item->sub_list != NULL)
+      delete_sub_list (item->sub_list);
     free (item->metrics->data);
     free (item->metrics);
     free (item);
@@ -196,8 +215,8 @@ free_holder_data (GHolderItem item) {
 
 /* Free all memory allocated in holder for a given module. */
 void
-free_holder_by_module (GHolder ** holder, GModule module) {
-  int j;
+free_holder_by_module (GHolder **holder, GModule module) {
+  uint32_t j;
 
   if ((*holder) == NULL)
     return;
@@ -214,9 +233,9 @@ free_holder_by_module (GHolder ** holder, GModule module) {
 
 /* Free all memory allocated in holder for all modules. */
 void
-free_holder (GHolder ** holder) {
+free_holder (GHolder **holder) {
   GModule module;
-  int j;
+  uint32_t j;
   size_t idx = 0;
 
   if ((*holder) == NULL)
@@ -239,8 +258,8 @@ free_holder (GHolder ** holder) {
  * If the key does not exist, -1 is returned.
  * On success, the key in holder is returned . */
 static int
-get_item_idx_in_holder (GHolder * holder, const char *k) {
-  int i;
+get_item_idx_in_holder (GHolder *holder, const char *k) {
+  uint32_t i;
   if (holder == NULL)
     return KEY_NOT_FOUND;
   if (holder->idx == 0)
@@ -256,56 +275,85 @@ get_item_idx_in_holder (GHolder * holder, const char *k) {
   return KEY_NOT_FOUND;
 }
 
+/* Sort a single GSubList in place: copy to array, sort, rebuild list.
+ * Preserves each sub-item's own sub_list for recursive nesting. */
+static void
+sort_single_sub_list (GSubList **sl_ptr, GModule module, GSort sort, int max_choices_sub) {
+  GHolderItem *arr;
+  GSubItem *iter;
+  GSubList *sub_list = *sl_ptr;
+  int j, k, limit;
+
+  if (sub_list == NULL || sub_list->size == 0)
+    return;
+
+  arr = new_gholder_item (sub_list->size);
+
+  /* copy items from the linked-list into an array, preserving sub_list */
+  for (j = 0, iter = sub_list->head; iter; iter = iter->next, j++) {
+    arr[j].metrics = new_gmetrics ();
+    arr[j].metrics->nbw = iter->metrics->nbw;
+    arr[j].metrics->data = xstrdup (iter->metrics->data);
+    arr[j].metrics->hits = iter->metrics->hits;
+    arr[j].metrics->id = iter->metrics->id;
+    arr[j].metrics->visitors = iter->metrics->visitors;
+    arr[j].sub_list = iter->sub_list;
+    iter->sub_list = NULL; /* prevent double-free */
+    if (conf.serve_usecs) {
+      arr[j].metrics->avgts.nts = iter->metrics->avgts.nts;
+      arr[j].metrics->cumts.nts = iter->metrics->cumts.nts;
+      arr[j].metrics->maxts.nts = iter->metrics->maxts.nts;
+    }
+  }
+  sort_holder_items (arr, j, sort);
+  delete_sub_list (sub_list);
+
+  /* Only rebuild up to max_choices_sub items */
+  limit = (j < max_choices_sub) ? j : max_choices_sub;
+  sub_list = new_gsublist ();
+  for (k = 0; k < limit; k++) {
+    if (k > 0)
+      sub_list = *sl_ptr;
+
+    add_sub_item_back (sub_list, module, arr[k].metrics);
+    sub_list->tail->sub_list = arr[k].sub_list;
+    *sl_ptr = sub_list;
+    sub_list = NULL;
+  }
+
+  /* Free items beyond max_choices_sub */
+  for (k = limit; k < j; k++) {
+    if (arr[k].sub_list != NULL)
+      delete_sub_list (arr[k].sub_list);
+    free (arr[k].metrics->data);
+    free (arr[k].metrics);
+  }
+
+  free (arr);
+  if (sub_list) {
+    delete_sub_list (sub_list);
+    sub_list = NULL;
+  }
+
+  /* recursively sort nested sub-lists */
+  sub_list = *sl_ptr;
+  if (sub_list != NULL) {
+    for (iter = sub_list->head; iter; iter = iter->next) {
+      if (iter->sub_list != NULL)
+        sort_single_sub_list (&iter->sub_list, module, sort, max_choices_sub);
+    }
+  }
+}
+
 /* Copy linked-list items to an array, sort, and move them back to the
  * list. Should be faster than sorting the list */
 static void
-sort_sub_list (GHolder * h, GSort sort) {
-  GHolderItem *arr;
-  GSubItem *iter;
-  GSubList *sub_list;
-  int i, j, k;
+sort_sub_list (GHolder *h, GSort sort) {
+  uint32_t i;
 
   /* iterate over root-level nodes */
   for (i = 0; i < h->idx; i++) {
-    sub_list = h->items[i].sub_list;
-    if (sub_list == NULL)
-      continue;
-
-    arr = new_gholder_item (sub_list->size);
-
-    /* copy items from the linked-list into an array */
-    for (j = 0, iter = sub_list->head; iter; iter = iter->next, j++) {
-      arr[j].metrics = new_gmetrics ();
-
-      arr[j].metrics->bw.nbw = iter->metrics->bw.nbw;
-      arr[j].metrics->data = xstrdup (iter->metrics->data);
-      arr[j].metrics->hits = iter->metrics->hits;
-      arr[j].metrics->id = iter->metrics->id;
-      arr[j].metrics->visitors = iter->metrics->visitors;
-      if (conf.serve_usecs) {
-        arr[j].metrics->avgts.nts = iter->metrics->avgts.nts;
-        arr[j].metrics->cumts.nts = iter->metrics->cumts.nts;
-        arr[j].metrics->maxts.nts = iter->metrics->maxts.nts;
-      }
-    }
-    sort_holder_items (arr, j, sort);
-    delete_sub_list (sub_list);
-
-    sub_list = new_gsublist ();
-    for (k = 0; k < j; k++) {
-      if (k > 0)
-        sub_list = h->items[i].sub_list;
-
-      add_sub_item_back (sub_list, h->module, arr[k].metrics);
-      h->items[i].sub_list = sub_list;
-      sub_list = NULL;
-    }
-
-    free (arr);
-    if (sub_list) {
-      delete_sub_list (sub_list);
-      sub_list = NULL;
-    }
+    sort_single_sub_list (&h->items[i].sub_list, h->module, sort, h->max_choices_sub);
   }
 }
 
@@ -313,7 +361,7 @@ sort_sub_list (GHolder * h, GSort sort) {
  *
  * On success, the data field/metric is set. */
 static int
-set_host_child_metrics (char *data, uint8_t id, GMetrics ** nmetrics) {
+set_host_child_metrics (char *data, uint8_t id, GMetrics **nmetrics) {
   GMetrics *metrics;
 
   metrics = new_gmetrics ();
@@ -324,25 +372,37 @@ set_host_child_metrics (char *data, uint8_t id, GMetrics ** nmetrics) {
   return 0;
 }
 
+/* Check whether static output requires synchronous hostname resolution.
+ *
+ * On success, non-zero is returned.
+ * On failure, 0 is returned. */
+static int
+is_static_output_resolver (void) {
+  return conf.enable_html_resolver && conf.output_stdout && !conf.no_ip_validation &&
+    !conf.real_time_html;
+}
+
 /* Set host panel data, including sub items.
  *
  * On success, the host panel data is set. */
 static void
-set_host_sub_list (GHolder * h, GSubList * sub_list) {
-  GMetrics *nmetrics;
+set_host_sub_list (GHolder *h, GSubList *sub_list) {
 #ifdef HAVE_GEOLOCATION
+  GMetrics *nmetrics;
   char city[CITY_LEN] = "";
   char continent[CONTINENT_LEN] = "";
-  char country[COUNTRY_LEN] = "";
+  char country[ASN_LEN] = "";
+  char asn[ASN_LEN] = "";
 #endif
 
-  char *host = h->items[h->idx].metrics->data, *hostname = NULL;
 #ifdef HAVE_GEOLOCATION
+  char *host = h->items[h->idx].metrics->data;
+
   /* add geolocation child nodes */
-  set_geolocation (host, continent, country, city);
+  set_geolocation (host, continent, country, city, asn);
 
   /* country */
-  if (country[0] != '\0') {
+  if (country[0] != '\0' && sub_list->size < h->max_choices_sub) {
     set_host_child_metrics (country, MTRC_ID_COUNTRY, &nmetrics);
     add_sub_item_back (sub_list, h->module, nmetrics);
     h->items[h->idx].sub_list = sub_list;
@@ -353,7 +413,7 @@ set_host_sub_list (GHolder * h, GSubList * sub_list) {
   }
 
   /* city */
-  if (city[0] != '\0') {
+  if (city[0] != '\0' && sub_list->size < h->max_choices_sub) {
     set_host_child_metrics (city, MTRC_ID_CITY, &nmetrics);
     add_sub_item_back (sub_list, h->module, nmetrics);
     h->items[h->idx].sub_list = sub_list;
@@ -362,16 +422,53 @@ set_host_sub_list (GHolder * h, GSubList * sub_list) {
     /* flag only */
     conf.has_geocity = 1;
   }
-#endif
 
-  /* hostname */
-  if (conf.enable_html_resolver && conf.output_stdout && !conf.no_ip_validation) {
-    hostname = reverse_ip (host);
-    set_host_child_metrics (hostname, MTRC_ID_HOSTNAME, &nmetrics);
+  /* ASN */
+  if (asn[0] != '\0' && sub_list->size < h->max_choices_sub) {
+    set_host_child_metrics (asn, MTRC_ID_ASN, &nmetrics);
     add_sub_item_back (sub_list, h->module, nmetrics);
     h->items[h->idx].sub_list = sub_list;
     h->sub_items_size++;
+
+    /* flag only */
+    conf.has_geoasn = 1;
+  }
+#else
+  (void) h;
+  (void) sub_list;
+#endif
+
+}
+
+/* Resolve and attach hostnames while updating spinner progress. */
+static void
+resolve_holder_hostnames (GHolder *h) {
+  GMetrics *nmetrics;
+  GSubList *sub_list;
+  char *hostname;
+  uint32_t i, resolved = 0, total = 0;
+
+  for (i = 0; i < h->idx; i++) {
+    sub_list = h->items[i].sub_list;
+    if (sub_list == NULL || sub_list->size < h->max_choices_sub)
+      total++;
+  }
+
+  set_spinner_progress ("Resolving hostnames", 0, total);
+  for (i = 0; i < h->idx; i++) {
+    sub_list = h->items[i].sub_list;
+    if (sub_list != NULL && sub_list->size >= h->max_choices_sub)
+      continue;
+
+    hostname = reverse_ip (h->items[i].metrics->data);
+    if (sub_list == NULL)
+      sub_list = new_gsublist ();
+    set_host_child_metrics (hostname, MTRC_ID_HOSTNAME, &nmetrics);
+    add_sub_item_back (sub_list, h->module, nmetrics);
+    h->items[i].sub_list = sub_list;
+    h->sub_items_size++;
     free (hostname);
+    set_spinner_progress ("Resolving hostnames", ++resolved, total);
   }
 }
 
@@ -379,16 +476,22 @@ set_host_sub_list (GHolder * h, GSubList * sub_list) {
  *
  * On success, the host panel data is set. */
 static void
-add_host_child_to_holder (GHolder * h) {
+add_host_child_to_holder (GHolder *h) {
   GMetrics *nmetrics;
   GSubList *sub_list = new_gsublist ();
 
   char *ip = h->items[h->idx].metrics->data;
   char *hostname = NULL;
-  int n = h->sub_items_size;
+  uint32_t n = h->sub_items_size;
 
   /* add child nodes */
   set_host_sub_list (h, sub_list);
+
+  if (is_static_output_resolver ()) {
+    if (n == h->sub_items_size)
+      free (sub_list);
+    return;
+  }
 
   pthread_mutex_lock (&gdns_thread.mutex);
   hostname = ht_get_hostname (ip);
@@ -397,11 +500,13 @@ add_host_child_to_holder (GHolder * h) {
   /* determine if we have the IP's hostname */
   if (!hostname) {
     dns_resolver (ip);
-  } else if (hostname) {
+  } else if (hostname && sub_list->size < h->max_choices_sub) {
     set_host_child_metrics (hostname, MTRC_ID_HOSTNAME, &nmetrics);
     add_sub_item_back (sub_list, h->module, nmetrics);
     h->items[h->idx].sub_list = sub_list;
     h->sub_items_size++;
+    free (hostname);
+  } else if (hostname) {
     free (hostname);
   }
 
@@ -415,7 +520,7 @@ add_host_child_to_holder (GHolder * h) {
  * On error, no values are set and 1 is returned.
  * On success, the data and hits values are set and 0 is returned. */
 static int
-map_data (GModule module, GRawDataItem item, datatype type, char **data, uint32_t * hits) {
+map_data (GModule module, GRawDataItem item, datatype type, char **data, uint32_t *hits) {
   switch (type) {
   case U32:
     if (!(*data = ht_get_datamap (module, item.nkey)))
@@ -435,7 +540,7 @@ map_data (GModule module, GRawDataItem item, datatype type, char **data, uint32_
 
 /* Given a data item, store it into a holder structure. */
 static void
-set_single_metrics (GRawDataItem item, GHolder * h, char *data, uint32_t hits) {
+set_single_metrics (GRawDataItem item, GHolder *h, char *data, uint32_t hits) {
   uint32_t visitors = 0;
   uint64_t bw = 0, cumts = 0, maxts = 0;
 
@@ -448,7 +553,7 @@ set_single_metrics (GRawDataItem item, GHolder * h, char *data, uint32_t hits) {
   h->items[h->idx].metrics->hits = hits;
   h->items[h->idx].metrics->data = data;
   h->items[h->idx].metrics->visitors = visitors;
-  h->items[h->idx].metrics->bw.nbw = bw;
+  h->items[h->idx].metrics->nbw = bw;
   h->items[h->idx].metrics->avgts.nts = cumts / hits;
   h->items[h->idx].metrics->cumts.nts = cumts;
   h->items[h->idx].metrics->maxts.nts = maxts;
@@ -470,7 +575,7 @@ set_single_metrics (GRawDataItem item, GHolder * h, char *data, uint32_t hits) {
 /* Set all panel data. This will set data for panels that do not
  * contain sub items. A function pointer is used for post data set. */
 static void
-add_data_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel) {
+add_data_to_holder (GRawDataItem item, GHolder *h, datatype type, const GPanel *panel) {
   char *data = NULL;
   uint32_t hits = 0;
 
@@ -484,68 +589,9 @@ add_data_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel 
   h->idx++;
 }
 
-/* A wrapper to set a host item */
-static void
-set_host (GRawDataItem item, GHolder * h, const GPanel * panel, char *data, uint32_t hits) {
-  set_single_metrics (item, h, xstrdup (data), hits);
-  if (panel->holder_callback)
-    panel->holder_callback (h);
-  h->idx++;
-}
-
-/* Set all panel data. This will set data for panels that do not
- * contain sub items. A function pointer is used for post data set. */
-static void
-add_host_to_holder (GRawDataItem item, GHolder * h, datatype type, const GPanel * panel) {
-  char buf4[INET_ADDRSTRLEN];
-  char buf6[INET6_ADDRSTRLEN];
-  char *data = NULL;
-  uint32_t hits = 0;
-  unsigned i;
-
-  struct in6_addr addr6, mask6, nwork6;
-  struct in_addr addr4, mask4, nwork4;
-
-  const char *m4 = "255.255.255.0";
-  const char *m6 = "ffff:ffff:ffff:ffff:0000:0000:0000:0000";
-
-  if (map_data (h->module, item, type, &data, &hits) == 1)
-    return;
-
-  if (!conf.anonymize_ip) {
-    add_data_to_holder (item, h, type, panel);
-    free (data);
-    return;
-  }
-
-  if (1 == inet_pton (AF_INET, data, &addr4)) {
-    if (1 == inet_pton (AF_INET, m4, &mask4)) {
-      memset (buf4, 0, sizeof *buf4);
-      nwork4.s_addr = addr4.s_addr & mask4.s_addr;
-
-      if (inet_ntop (AF_INET, &nwork4, buf4, INET_ADDRSTRLEN) != NULL) {
-        set_host (item, h, panel, buf4, hits);
-        free (data);
-      }
-    }
-  } else if (1 == inet_pton (AF_INET6, data, &addr6)) {
-    if (1 == inet_pton (AF_INET6, m6, &mask6)) {
-      memset (buf6, 0, sizeof *buf6);
-      for (i = 0; i < 16; i++) {
-        nwork6.s6_addr[i] = addr6.s6_addr[i] & mask6.s6_addr[i];
-      }
-
-      if (inet_ntop (AF_INET6, &nwork6, buf6, INET6_ADDRSTRLEN) != NULL) {
-        set_host (item, h, panel, buf6, hits);
-        free (data);
-      }
-    }
-  }
-}
-
 /* Set all root panel data. This will set the root nodes. */
 static int
-set_root_metrics (GRawDataItem item, GModule module, datatype type, GMetrics ** nmetrics) {
+set_root_metrics (GRawDataItem item, GModule module, datatype type, GMetrics **nmetrics) {
   GMetrics *metrics;
   char *data = NULL;
   uint64_t bw = 0, cumts = 0, maxts = 0;
@@ -563,7 +609,7 @@ set_root_metrics (GRawDataItem item, GModule module, datatype type, GMetrics ** 
   metrics->avgts.nts = cumts / hits;
   metrics->cumts.nts = cumts;
   metrics->maxts.nts = maxts;
-  metrics->bw.nbw = bw;
+  metrics->nbw = bw;
   metrics->data = data;
   metrics->hits = hits;
   metrics->visitors = visitors;
@@ -574,8 +620,7 @@ set_root_metrics (GRawDataItem item, GModule module, datatype type, GMetrics ** 
 
 /* Set all root panel data, including sub list items. */
 static void
-add_root_to_holder (GRawDataItem item, GHolder * h, datatype type,
-                    GO_UNUSED const GPanel * panel) {
+add_root_to_holder (GRawDataItem item, GHolder *h, datatype type, GO_UNUSED const GPanel *panel) {
   GSubList *sub_list;
   GMetrics *metrics, *nmetrics;
   char *root = NULL;
@@ -591,6 +636,12 @@ add_root_to_holder (GRawDataItem item, GHolder * h, datatype type,
 
   /* add data as a child node into holder */
   if (KEY_NOT_FOUND == (root_idx = get_item_idx_in_holder (h, root))) {
+    /* Check if we've reached max_choices for root items */
+    if (h->idx >= h->max_choices) {
+      free (root);
+      free_gmetrics (nmetrics);
+      return;
+    }
     idx = h->idx;
     sub_list = new_gsublist ();
     metrics = new_gmetrics ();
@@ -606,48 +657,614 @@ add_root_to_holder (GRawDataItem item, GHolder * h, datatype type,
     free (root);
   }
 
-  add_sub_item_back (sub_list, h->module, nmetrics);
-  h->items[idx].sub_list = sub_list;
-
+  /* Accumulate metrics into parent regardless of whether we add the sub-item */
   h->items[idx].metrics = metrics;
   h->items[idx].metrics->cumts.nts += nmetrics->cumts.nts;
-  h->items[idx].metrics->bw.nbw += nmetrics->bw.nbw;
+  h->items[idx].metrics->nbw += nmetrics->nbw;
   h->items[idx].metrics->hits += nmetrics->hits;
   h->items[idx].metrics->visitors += nmetrics->visitors;
-  h->items[idx].metrics->avgts.nts =
-    h->items[idx].metrics->cumts.nts / h->items[idx].metrics->hits;
+  h->items[idx].metrics->avgts.nts = h->items[idx].metrics->cumts.nts / h->items[idx].metrics->hits;
 
   if (nmetrics->maxts.nts > h->items[idx].metrics->maxts.nts)
     h->items[idx].metrics->maxts.nts = nmetrics->maxts.nts;
 
+  /* Only add sub-item if we haven't reached max_choices_sub for this sub-list */
+  if (sub_list->size < h->max_choices_sub) {
+    add_sub_item_back (sub_list, h->module, nmetrics);
+    h->items[idx].sub_list = sub_list;
+    h->sub_items_size++;
+  } else {
+    free_gmetrics (nmetrics);
+  }
+}
+
+/* Accumulate source metrics into a parent hierarchy node. */
+static void
+accumulate_holder_metrics (GMetrics *dest, const GMetrics *source) {
+  dest->cumts.nts += source->cumts.nts;
+  dest->nbw += source->nbw;
+  dest->hits += source->hits;
+  dest->visitors += source->visitors;
+
+  if (source->maxts.nts > dest->maxts.nts)
+    dest->maxts.nts = source->maxts.nts;
+  if (dest->hits > 0)
+    dest->avgts.nts = dest->cumts.nts / dest->hits;
+}
+
+/* Find a hierarchy sub-item by its data string.
+ *
+ * On success, the matching sub-item is returned.
+ * On failure, NULL is returned. */
+static GSubItem *
+find_sub_item_by_data (GSubList *sl, const char *data) {
+  GSubItem *iter = NULL;
+
+  if (sl == NULL || data == NULL)
+    return NULL;
+
+  for (iter = sl->head; iter; iter = iter->next) {
+    if (strcmp (iter->metrics->data, data) == 0)
+      return iter;
+  }
+
+  return NULL;
+}
+
+/* Check whether a UTM level is populated or explicitly missing.
+ *
+ * On success, non-zero is returned.
+ * On failure, 0 is returned. */
+static int
+has_utm_component (const GUTM *utm, size_t level) {
+  if (utm->value[level] != NULL)
+    return 1;
+  if (level < UTM_PRIMARY_LEVEL_COUNT && utm->missing[level])
+    return 1;
+
+  return 0;
+}
+
+/* Allocate the display value for a populated or explicitly missing UTM level.
+ *
+ * On success, the allocated display value is returned.
+ * On failure, NULL is returned. */
+static char *
+alloc_utm_display_value (const GUTM *utm, size_t level) {
+  const char *parameter = NULL, *value = NULL;
+  char *display = NULL;
+  int len = 0;
+
+  if (level < UTM_PRIMARY_LEVEL_COUNT && utm->missing[level])
+    return xstrdup (_(utm_missing_labels[level]));
+  if ((value = utm->value[level]) == NULL)
+    return NULL;
+  if (level < UTM_PRIMARY_LEVEL_COUNT)
+    return xstrdup (value);
+  if (!(parameter = get_utm_parameter_name ((GUTMLevel) level)))
+    return NULL;
+
+  len = snprintf (NULL, 0, "%s: %s", parameter, value);
+  if (len < 0)
+    return NULL;
+  display = xmalloc ((size_t) len + 1);
+  snprintf (display, (size_t) len + 1, "%s: %s", parameter, value);
+
+  return display;
+}
+
+/* Build a distinct holder identity for a present or missing UTM level.
+ *
+ * On success, the holder identity is returned.
+ * On failure, the level itself is returned. */
+static size_t
+get_utm_holder_identity (const GUTM *utm, size_t level) {
+  if (level < UTM_PRIMARY_LEVEL_COUNT && utm->missing[level])
+    return UTM_LEVEL_COUNT + level;
+
+  return level;
+}
+
+/* Find a UTM root item by its semantic identity and display value.
+ *
+ * On success, the matching holder item is returned.
+ * On failure, NULL is returned. */
+static GHolderItem *
+find_utm_root_item (GHolder *h, const char *value, size_t identity) {
+  uint32_t idx = 0;
+
+  for (idx = 0; idx < h->idx; idx++) {
+    if (h->items[idx].metrics->id == identity && strcmp (h->items[idx].metrics->data, value) == 0)
+      return &h->items[idx];
+  }
+
+  return NULL;
+}
+
+/* Find or create a root item for a UTM hierarchy.
+ *
+ * On success, the holder item is returned.
+ * On failure, NULL is returned. */
+static GHolderItem *
+get_utm_root_item (GHolder *h, const char *value, size_t identity) {
+  GHolderItem *item = NULL;
+  GMetrics *metrics = NULL;
+  uint32_t idx = 0;
+
+  item = find_utm_root_item (h, value, identity);
+  if (item != NULL)
+    return item;
+  if (h->idx >= h->max_choices)
+    return NULL;
+
+  idx = h->idx;
+  metrics = new_gmetrics ();
+  metrics->data = xstrdup (value);
+  metrics->id = (uint8_t) identity;
+  h->items[idx].metrics = metrics;
+  h->idx++;
+
+  return &h->items[idx];
+}
+
+/* Find a UTM sub-item by its semantic identity and display value.
+ *
+ * On success, the matching sub-item is returned.
+ * On failure, NULL is returned. */
+static GSubItem *
+find_utm_sub_item (GSubList *sub_list, const char *value, size_t identity) {
+  GSubItem *item = NULL;
+
+  for (item = sub_list->head; item; item = item->next) {
+    if (item->metrics->id == identity && strcmp (item->metrics->data, value) == 0)
+      return item;
+  }
+
+  return NULL;
+}
+
+/* Find or create a child item in a UTM hierarchy level.
+ *
+ * On success, the child item is returned.
+ * On failure, NULL is returned. */
+static GSubItem *
+get_utm_sub_item (GHolder *h, GSubList *sub_list, const char *value, size_t identity) {
+  GMetrics *metrics = NULL;
+  GSubItem *item = NULL;
+
+  item = find_utm_sub_item (sub_list, value, identity);
+  if (item != NULL)
+    return item;
+  if (sub_list->size >= h->max_choices_sub)
+    return NULL;
+
+  metrics = new_gmetrics ();
+  metrics->data = xstrdup (value);
+  metrics->id = (uint8_t) identity;
+  add_sub_item_back (sub_list, h->module, metrics);
   h->sub_items_size++;
+
+  return sub_list->tail;
+}
+
+/* Build the UTM campaign hierarchy from all populated parameter levels. */
+static void
+add_utm_to_holder (GRawDataItem item, GHolder *h, datatype type, GO_UNUSED const GPanel *panel) {
+  char *display = NULL;
+  GHolderItem *root_item = NULL;
+  GMetrics *metrics = NULL;
+  GSubItem *sub_item = NULL;
+  GSubList **sub_list = NULL;
+  GUTM utm = { 0 };
+  size_t first_level = UTM_LEVEL_COUNT, identity = 0, level = 0;
+
+  if (set_root_metrics (item, h->module, type, &metrics) == 1)
+    return;
+  if (decode_utm_path (metrics->data, &utm) == 1) {
+    free_gmetrics (metrics);
+    return;
+  }
+
+  for (level = 0; level < UTM_LEVEL_COUNT; level++) {
+    if (has_utm_component (&utm, level)) {
+      first_level = level;
+      break;
+    }
+  }
+  if (first_level == UTM_LEVEL_COUNT) {
+    free_utm (&utm);
+    free_gmetrics (metrics);
+    return;
+  }
+
+  display = alloc_utm_display_value (&utm, first_level);
+  if (display == NULL) {
+    free_utm (&utm);
+    free_gmetrics (metrics);
+    return;
+  }
+  identity = get_utm_holder_identity (&utm, first_level);
+  root_item = get_utm_root_item (h, display, identity);
+  free (display);
+  display = NULL;
+  if (root_item == NULL) {
+    free_utm (&utm);
+    free_gmetrics (metrics);
+    return;
+  }
+  accumulate_holder_metrics (root_item->metrics, metrics);
+
+  sub_list = &root_item->sub_list;
+  for (level = first_level + 1; level < UTM_LEVEL_COUNT; level++) {
+    display = alloc_utm_display_value (&utm, level);
+    if (display == NULL)
+      continue;
+    if (*sub_list == NULL)
+      *sub_list = new_gsublist ();
+
+    identity = get_utm_holder_identity (&utm, level);
+    sub_item = get_utm_sub_item (h, *sub_list, display, identity);
+    free (display);
+    display = NULL;
+    if (sub_item == NULL)
+      break;
+
+    accumulate_holder_metrics (sub_item->metrics, metrics);
+    sub_list = &sub_item->sub_list;
+  }
+
+  free_utm (&utm);
+  free_gmetrics (metrics);
+}
+
+#ifdef HAVE_GEOLOCATION
+/* Find or create a continent in the geolocation holder.
+ *
+ * On success, the continent item is returned.
+ * On failure, NULL is returned when the root limit is reached. */
+static GHolderItem *
+get_geo_continent_item (GHolder *h, const char *continent) {
+  GHolderItem *item = NULL;
+  int idx = get_item_idx_in_holder (h, continent);
+
+  if (idx != KEY_NOT_FOUND)
+    return &h->items[idx];
+  if (h->idx >= h->max_choices)
+    return NULL;
+
+  item = &h->items[h->idx++];
+  item->metrics = new_gmetrics ();
+  item->metrics->data = xstrdup (continent);
+  item->sub_list = new_gsublist ();
+
+  return item;
+}
+
+/* Find or create a country beneath its continent.
+ *
+ * On success, the country item is returned.
+ * On failure, NULL is returned when the country limit is reached. */
+static GSubItem *
+get_geo_country_item (GHolder *h, GSubList *countries, const char *country) {
+  GSubItem *item = find_sub_item_by_data (countries, country);
+  GMetrics *metrics = NULL;
+
+  if (item)
+    return item;
+  if (countries->size >= h->max_choices_sub)
+    return NULL;
+
+  metrics = new_gmetrics ();
+  metrics->data = xstrdup (country);
+  add_sub_item_back (countries, h->module, metrics);
+  h->sub_items_size++;
+
+  return countries->tail;
+}
+
+/* Build the recorded hierarchy, including mixed country and city rows. */
+static void
+add_geo_to_holder (GRawDataItem item, GHolder *h, datatype type, GO_UNUSED const GPanel *panel) {
+  GMetrics *metrics = NULL;
+  GHolderItem *continent_item = NULL;
+  GSubItem *country_item = NULL;
+  char *root = NULL, *display = NULL;
+  const char *city = NULL, *country = NULL, *continent = NULL;
+
+  if (set_root_metrics (item, h->module, type, &metrics) == 1)
+    return;
+  if (!(root = ht_get_root (h->module, item.nkey))) {
+    free_gmetrics (metrics);
+    return;
+  }
+
+  /* The stored identity, rather than the current MMDB, determines the level. */
+  city = geo_city_name (metrics->data, root);
+  country = city ? root : metrics->data;
+  continent = city ? get_continent_for_country (country) : root;
+  if (!continent)
+    continent = GEO_UNKNOWN;
+
+  continent_item = get_geo_continent_item (h, continent);
+  if (!continent_item)
+    goto clean;
+  accumulate_holder_metrics (continent_item->metrics, metrics);
+
+  country_item = get_geo_country_item (h, continent_item->sub_list, country);
+  if (!country_item)
+    goto clean;
+  accumulate_holder_metrics (country_item->metrics, metrics);
+
+  if (!city)
+    goto clean;
+  if (!country_item->sub_list)
+    country_item->sub_list = new_gsublist ();
+  if (country_item->sub_list->size >= h->max_choices_sub)
+    goto clean;
+
+  display = xstrdup (city);
+  free (metrics->data);
+  metrics->data = display;
+  add_sub_item_back (country_item->sub_list, h->module, metrics);
+  h->sub_items_size++;
+  metrics = NULL;
+
+clean:
+  free (root);
+  if (metrics)
+    free_gmetrics (metrics);
+}
+#endif
+
+/* Extract the TLS version component from an encoded hierarchy path.
+ *
+ * On success, the allocated version string is returned.
+ * On failure, NULL is returned. */
+static char *
+extract_tls_version_path (const char *path) {
+  const char *separator = NULL;
+  char *version = NULL;
+  size_t len = 0;
+
+  if (!path)
+    return NULL;
+
+  separator = strchr (path, TLS_HIERARCHY_SEPARATOR);
+  len = separator ? (size_t) (separator - path) : strlen (path);
+  if (len == 0)
+    return NULL;
+
+  version = xmalloc (len + 1);
+  memcpy (version, path, len);
+  version[len] = '\0';
+
+  return version;
+}
+
+/* Extract the group component beneath an encoded TLS parent path.
+ *
+ * On success, a pointer to the group component is returned.
+ * On failure, NULL is returned. */
+static const char *
+extract_tls_group_path (const char *path, const char *parent) {
+  size_t parent_len = 0;
+
+  if (!path || !parent)
+    return NULL;
+
+  parent_len = strlen (parent);
+  if (strncmp (path, parent, parent_len) != 0 ||
+      path[parent_len] != TLS_HIERARCHY_SEPARATOR || path[parent_len + 1] == '\0')
+    return NULL;
+
+  return path + parent_len + 1;
+}
+
+/* Find or create a TLS version root holder item.
+ *
+ * On success, the holder item is returned.
+ * On failure, NULL is returned. */
+static GHolderItem *
+get_tls_root_item (GHolder *h, const char *version) {
+  GMetrics *metrics = NULL;
+  int idx = KEY_NOT_FOUND;
+
+  idx = get_item_idx_in_holder (h, version);
+  if (idx != KEY_NOT_FOUND)
+    return &h->items[idx];
+  if (h->idx >= h->max_choices)
+    return NULL;
+
+  idx = h->idx;
+  metrics = new_gmetrics ();
+  metrics->data = xstrdup (version);
+  h->items[idx].metrics = metrics;
+  h->items[idx].sub_list = new_gsublist ();
+  h->idx++;
+
+  return &h->items[idx];
+}
+
+/* Find or create a TLS cipher parent beneath a version node.
+ *
+ * On success, the cipher sub-item is returned.
+ * On failure, NULL is returned. */
+static GSubItem *
+get_tls_cipher_item (GHolder *h, GSubList *sub_list, const char *cipher) {
+  GMetrics *metrics = NULL;
+  GSubItem *item = NULL;
+
+  item = find_sub_item_by_data (sub_list, cipher);
+  if (item) {
+    if (!item->sub_list)
+      item->sub_list = new_gsublist ();
+    return item;
+  }
+  if (sub_list->size >= h->max_choices_sub)
+    return NULL;
+
+  metrics = new_gmetrics ();
+  metrics->data = xstrdup (cipher);
+  add_sub_item_back (sub_list, h->module, metrics);
+  item = sub_list->tail;
+  item->sub_list = new_gsublist ();
+  h->sub_items_size++;
+
+  return item;
+}
+
+/* Add or merge a TLS leaf metric into a hierarchy sub-list. */
+static void
+add_tls_leaf_metrics (GHolder *h, GSubList *sub_list, GMetrics *metrics, const char *display) {
+  GSubItem *item = NULL;
+  char *label = NULL;
+
+  item = find_sub_item_by_data (sub_list, display);
+  if (item) {
+    accumulate_holder_metrics (item->metrics, metrics);
+    free_gmetrics (metrics);
+    return;
+  }
+  if (sub_list->size >= h->max_choices_sub) {
+    free_gmetrics (metrics);
+    return;
+  }
+
+  if (strcmp (metrics->data, display) != 0) {
+    label = xstrdup (display);
+    free (metrics->data);
+    metrics->data = label;
+  }
+  add_sub_item_back (sub_list, h->module, metrics);
+  h->sub_items_size++;
+}
+
+/* Build the TLS hierarchy as version, cipher suite, and key exchange group. */
+static void
+add_tls_to_holder (GRawDataItem item, GHolder *h, datatype type, GO_UNUSED const GPanel *panel) {
+  GHolderItem *version_item = NULL;
+  GMetrics *metrics = NULL;
+  GSubItem *cipher_item = NULL;
+  GSubList *leaf_list = NULL;
+  const char *cipher = NULL, *group = NULL, *separator = NULL;
+  char *root = NULL, *version = NULL;
+
+  if (set_root_metrics (item, h->module, type, &metrics) == 1)
+    return;
+  if (!(root = ht_get_root (h->module, item.nkey))) {
+    free_gmetrics (metrics);
+    return;
+  }
+  if (!(version = extract_tls_version_path (root))) {
+    free (root);
+    free_gmetrics (metrics);
+    return;
+  }
+  if (!(version_item = get_tls_root_item (h, version))) {
+    free (version);
+    free (root);
+    free_gmetrics (metrics);
+    return;
+  }
+
+  accumulate_holder_metrics (version_item->metrics, metrics);
+  separator = strchr (root, TLS_HIERARCHY_SEPARATOR);
+  if (!separator) {
+    add_tls_leaf_metrics (h, version_item->sub_list, metrics, metrics->data);
+    free (version);
+    free (root);
+    return;
+  }
+
+  group = extract_tls_group_path (metrics->data, root);
+  if (!group) {
+    free (version);
+    free (root);
+    free_gmetrics (metrics);
+    return;
+  }
+
+  cipher = separator + 1;
+  leaf_list = version_item->sub_list;
+  if (*cipher != '\0') {
+    cipher_item = get_tls_cipher_item (h, version_item->sub_list, root);
+    if (!cipher_item) {
+      free (version);
+      free (root);
+      free_gmetrics (metrics);
+      return;
+    }
+    accumulate_holder_metrics (cipher_item->metrics, metrics);
+    leaf_list = cipher_item->sub_list;
+  }
+
+  add_tls_leaf_metrics (h, leaf_list, metrics, group);
+  free (version);
+  free (root);
+}
+
+/* Check whether a panel groups multiple raw items under fewer root items.
+ *
+ * On success, non-zero is returned when the panel is hierarchical.
+ * On failure, 0 is returned. */
+static int
+is_hierarchical_panel (const GPanel *panel) {
+  return (panel->insert == add_root_to_holder ||
+          panel->insert == add_tls_to_holder || panel->insert == add_utm_to_holder ||
+#ifdef HAVE_GEOLOCATION
+          panel->insert == add_geo_to_holder ||
+#endif
+          0);
+}
+
+/* Get the number of top raw keys a module's holder consumes.
+ *
+ * On success, max_choices is returned for flat panels, which only render
+ * their top keys, or RAW_DATA_ALL for hierarchical panels, which aggregate
+ * every key into their root items. */
+uint32_t
+get_holder_raw_limit (GModule module, uint32_t max_choices) {
+  return is_hierarchical_panel (panel_lookup (module)) ? RAW_DATA_ALL : max_choices;
 }
 
 /* Load raw data into our holder structure */
 void
-load_holder_data (GRawData * raw_data, GHolder * h, GModule module, GSort sort) {
-  int i;
-  uint32_t size = 0, max_choices = get_max_choices ();
+load_holder_data (GRawData *raw_data, GHolder *h, GModule module, GSort sort, uint32_t max_choices,
+                  uint32_t max_choices_sub) {
+  uint32_t i;
+  uint32_t size = 0, retained = 0;
+  uint32_t alloc_size = 0;
   const GPanel *panel = panel_lookup (module);
+  int is_hierarchical = is_hierarchical_panel (panel);
 
 #ifdef _DEBUG
   clock_t begin = clock ();
   double taken;
-  char *modstr = NULL;
+  const char *modstr = NULL;
   LOG_DEBUG (("== load_holder_data ==\n"));
 #endif
 
   size = raw_data->size;
-  h->holder_size = size > max_choices ? max_choices : size;
+  retained = raw_data->idx;
+  /* For hierarchical data, we don't know how many root items we'll create,
+   * but it can't be more than size or max_choices */
+  alloc_size = size > max_choices ? max_choices : size;
+  /* iterate the retained items only; the extraction may be bounded to the
+   * top keys while size still counts every key in the table */
+  h->holder_size = is_hierarchical ? retained : (retained > max_choices ? max_choices : retained);
   h->ht_size = size;
   h->idx = 0;
   h->module = module;
   h->sub_items_size = 0;
-  h->items = new_gholder_item (h->holder_size);
+  h->max_choices = max_choices;
+  h->max_choices_sub = max_choices_sub;
+  h->items = new_gholder_item (alloc_size);
 
   for (i = 0; i < h->holder_size; i++) {
     panel->insert (raw_data->items[i], h, raw_data->type, panel);
   }
+  if (module == HOSTS && is_static_output_resolver ())
+    resolve_holder_hostnames (h);
   sort_holder_items (h->items, h->idx, sort);
   if (h->sub_items_size)
     sort_sub_list (h, sort);
@@ -657,6 +1274,5 @@ load_holder_data (GRawData * raw_data, GHolder * h, GModule module, GSort sort) 
   modstr = get_module_str (module);
   taken = (double) (clock () - begin) / CLOCKS_PER_SEC;
   LOG_DEBUG (("== %-30s%f\n\n", modstr, taken));
-  free (modstr);
 #endif
 }

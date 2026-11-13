@@ -7,7 +7,7 @@
  * \____/\____/_/  |_\___/\___/\___/____/____/
  *
  * The MIT License (MIT)
- * Copyright (c) 2009-2020 Gerardo Orellana <hello @ goaccess.io>
+ * Copyright (c) 2009-2026 Gerardo Orellana <hello @ goaccess.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -38,9 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 #include <inttypes.h>
 
 #include "csv.h"
@@ -49,6 +47,15 @@
 #include "gkhash.h"
 #include "ui.h"
 #include "util.h"
+
+/* ASCII bytes below space must be represented as visible text in CSV fields. */
+#define CSV_ASCII_PRINTABLE_MIN 0x20
+/* DEL is the remaining ASCII control byte. */
+#define CSV_ASCII_DELETE        0x7f
+/* UTF-8 C1 controls use C2 followed by their U+0080 through U+009F value. */
+#define CSV_UTF8_C1_LEAD        0xc2
+#define CSV_C1_MIN              0x80
+#define CSV_C1_MAX              0x9f
 
 struct tm now_tm;
 
@@ -62,7 +69,7 @@ static void print_csv_data (FILE * fp, GHolder * h, GPercTotals totals);
 
 /* *INDENT-OFF* */
 /* A function pointer for each panel */
-static GPanel paneling[] = {
+static const GPanel paneling[] = {
   {VISITORS        , print_csv_data} ,
   {REQUESTS        , print_csv_data} ,
   {REQUESTS_STATIC , print_csv_data} ,
@@ -74,15 +81,16 @@ static GPanel paneling[] = {
   {VIRTUAL_HOSTS   , print_csv_data} ,
   {REFERRERS       , print_csv_data} ,
   {REFERRING_SITES , print_csv_data} ,
-  {KEYPHRASES      , print_csv_data} ,
   {STATUS_CODES    , print_csv_data} ,
   {REMOTE_USER     , print_csv_data} ,
   {CACHE_STATUS    , print_csv_data} ,
 #ifdef HAVE_GEOLOCATION
   {GEO_LOCATION    , print_csv_data} ,
+  {ASN             , print_csv_data} ,
 #endif
   {MIME_TYPE       , print_csv_data} ,
   {TLS_TYPE        , print_csv_data} ,
+  {UTM_CAMPAIGNS   , print_csv_data} ,
 };
 /* *INDENT-ON* */
 
@@ -90,7 +98,7 @@ static GPanel paneling[] = {
  *
  * On error, or if not found, NULL is returned.
  * On success, the panel value is returned. */
-static GPanel *
+static const GPanel *
 panel_lookup (GModule module) {
   int i, num_panels = ARRAY_SIZE (paneling);
 
@@ -101,19 +109,39 @@ panel_lookup (GModule module) {
   return NULL;
 }
 
-/* Iterate over the string and escape CSV output. */
+/* Write CSV field content with escaped quotes, controls and invalid UTF-8. */
 static void
-escape_cvs_output (FILE * fp, char *s) {
-  while (*s) {
-    switch (*s) {
-    case '"':
-      fprintf (fp, "\"\"");
-      break;
-    default:
-      fputc (*s, fp);
-      break;
+escape_csv_output (FILE *fp, const char *s) {
+  const unsigned char *p = (const unsigned char *) s;
+  int len = 0, valid = 0;
+
+  for (; *p; p++) {
+    if (*p < CSV_ASCII_PRINTABLE_MIN || *p == CSV_ASCII_DELETE) {
+      fprintf (fp, "\\x%02x", (unsigned int) *p);
+      continue;
     }
-    s++;
+    if (*p == '"') {
+      fputs ("\"\"", fp);
+      continue;
+    }
+    if (*p >= 0x80) {
+      /* Escape invalid bytes individually so the file stays valid UTF-8
+       * and the original bytes remain readable. */
+      len = utf8_seq_len ((const char *) p, &valid);
+
+      if (!valid) {
+        fprintf (fp, "\\x%02x", (unsigned int) *p);
+        continue;
+      }
+      /* Some UTF-8 terminals interpret C1 controls as escape sequences. */
+      if (*p == CSV_UTF8_C1_LEAD && p[1] >= CSV_C1_MIN && p[1] <= CSV_C1_MAX)
+        fprintf (fp, "\\u%04x", (unsigned int) p[1]);
+      else
+        fwrite (p, 1, len, fp);
+      p += len - 1;
+      continue;
+    }
+    fputc (*p, fp);
   }
 }
 
@@ -121,7 +149,7 @@ escape_cvs_output (FILE * fp, char *s) {
  *
  * On success, outputs item value. */
 static void
-print_csv_metric_block (FILE * fp, GMetrics * nmetrics) {
+print_csv_metric_block (FILE *fp, GMetrics *nmetrics) {
   /* basic metrics */
   fprintf (fp, "\"%" PRIu64 "\",", nmetrics->hits);
   fprintf (fp, "\"%4.2f%%\",", nmetrics->hits_perc);
@@ -130,7 +158,7 @@ print_csv_metric_block (FILE * fp, GMetrics * nmetrics) {
 
   /* bandwidth */
   if (conf.bandwidth) {
-    fprintf (fp, "\"%" PRIu64 "\",", nmetrics->bw.nbw);
+    fprintf (fp, "\"%" PRIu64 "\",", nmetrics->nbw);
     fprintf (fp, "\"%4.2f%%\",", nmetrics->bw_perc);
   }
 
@@ -153,7 +181,7 @@ print_csv_metric_block (FILE * fp, GMetrics * nmetrics) {
 
   /* data field */
   fprintf (fp, "\"");
-  escape_cvs_output (fp, nmetrics->data);
+  escape_csv_output (fp, nmetrics->data);
   fprintf (fp, "\"\r\n");
 }
 
@@ -162,12 +190,12 @@ print_csv_metric_block (FILE * fp, GMetrics * nmetrics) {
  * On error, it exits early.
  * On success, outputs item value. */
 static void
-print_csv_sub_items (FILE * fp, GHolder * h, int idx, GPercTotals totals) {
+print_csv_sub_items (FILE *fp, GSubList *sub_list, GModule module, int parent_idx,
+                     GPercTotals totals, int depth) {
   GMetrics *nmetrics;
-  GSubList *sub_list = h->items[idx].sub_list;
   GSubItem *iter;
 
-  int i = 0;
+  uint32_t i = 0;
 
   if (sub_list == NULL)
     return;
@@ -175,12 +203,18 @@ print_csv_sub_items (FILE * fp, GHolder * h, int idx, GPercTotals totals) {
   for (iter = sub_list->head; iter; iter = iter->next, i++) {
     set_data_metrics (iter->metrics, &nmetrics, totals);
 
-    fprintf (fp, "\"%d\",", i); /* idx */
-    fprintf (fp, "\"%d\",", idx);       /* parent idx */
-    fprintf (fp, "\"%s\",", module_to_id (h->module));
+    fprintf (fp, "\"%u\",", i); /* idx */
+    fprintf (fp, "\"%d\",", parent_idx); /* parent idx */
+    fprintf (fp, "\"%s\",", module_to_id (module));
+    fprintf (fp, "\"%d\",", depth); /* depth */
 
     /* output metrics */
     print_csv_metric_block (fp, nmetrics);
+
+    /* recurse into nested sub-items */
+    if (iter->sub_list != NULL)
+      print_csv_sub_items (fp, iter->sub_list, module, i, totals, depth + 1);
+
     free (nmetrics);
   }
 }
@@ -189,22 +223,22 @@ print_csv_sub_items (FILE * fp, GHolder * h, int idx, GPercTotals totals) {
  *
  * On success, outputs item value. */
 static void
-print_csv_data (FILE * fp, GHolder * h, GPercTotals totals) {
+print_csv_data (FILE *fp, GHolder *h, GPercTotals totals) {
   GMetrics *nmetrics;
-  int i;
+  uint32_t i;
 
   for (i = 0; i < h->idx; i++) {
     set_data_metrics (h->items[i].metrics, &nmetrics, totals);
 
-    fprintf (fp, "\"%d\",", i); /* idx */
-    fprintf (fp, ",");  /* no parent */
+    fprintf (fp, "\"%u\",", i); /* idx */
+    fprintf (fp, ","); /* no parent */
     fprintf (fp, "\"%s\",", module_to_id (h->module));
 
     /* output metrics */
     print_csv_metric_block (fp, nmetrics);
 
     if (h->sub_items_size)
-      print_csv_sub_items (fp, h, i, totals);
+      print_csv_sub_items (fp, h->items[i].sub_list, h->module, i, totals, 1);
 
     free (nmetrics);
   }
@@ -213,7 +247,7 @@ print_csv_data (FILE * fp, GHolder * h, GPercTotals totals) {
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
 /* Output general statistics information. */
 static void
-print_csv_summary (FILE * fp) {
+print_csv_summary (FILE *fp) {
   char now[DATE_TIME];
   char *source = NULL;
   const char *fmt;
@@ -249,7 +283,7 @@ print_csv_summary (FILE * fp) {
 
   /* visitors */
   fmt = "\"%d\",,\"%s\",,,,,,,,\"%" PRIu64 "\",\"%s\"\r\n";
-  total = ht_get_size_uniqmap (VISITORS);
+  total = ht_sum_uniq_visitors ();
   fprintf (fp, fmt, i++, GENER_ID, total, OVERALL_VISITORS);
 
   /* files */
@@ -259,6 +293,12 @@ print_csv_summary (FILE * fp) {
   /* excluded hits */
   total = ht_get_excluded_ips ();
   fprintf (fp, fmt, i++, GENER_ID, total, OVERALL_EXCL_HITS);
+
+#ifdef HAVE_LIBMAXMINDDB
+  /* ASN excluded hits */
+  total = ht_get_excluded_asns ();
+  fprintf (fp, fmt, i++, GENER_ID, total, OVERALL_EXCL_ASN_HITS);
+#endif
 
   /* referrers */
   total = ht_get_size_datamap (REFERRERS);
@@ -289,9 +329,9 @@ print_csv_summary (FILE * fp) {
 
 #pragma GCC diagnostic warning "-Wformat-nonliteral"
 
-/* Entry point to generate a a csv report writing it to the fp */
+/* Entry point to generate a csv report writing it to the fp */
 void
-output_csv (GHolder * holder, const char *filename) {
+output_csv (GHolder *holder, const char *filename) {
   GModule module;
   GPercTotals totals;
   const GPanel *panel = NULL;
